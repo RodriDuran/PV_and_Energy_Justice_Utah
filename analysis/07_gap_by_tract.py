@@ -972,13 +972,8 @@ def simulate(table: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return summary, draws
 
 
-def curve_check(buildings: list[int]) -> pd.DataFrame:
-    """Leave-one-dwelling-out check of the heat pump curve against the package run.
-
-    For every dwelling with a package simulation the curve is rebuilt from the bin
-    sums of all the other dwellings, applied to its useful energy and compared with
-    the electricity that its own simulation used (heating, cooling and fans).
-    """
+def _package_sums(buildings: list[int]) -> tuple[dict, np.ndarray]:
+    """Bin sums by outdoor temperature of the package runs of every dwelling."""
     edges = np.arange(-25.0, 45.0 + 2.5, 2.5)
     sums = {}
     for b in buildings:
@@ -1005,6 +1000,68 @@ def curve_check(buildings: list[int]) -> pd.DataFrame:
                 "direct": float(electricity.sum()),
             }
         sums[b] = entry
+    return sums, edges
+
+
+def curve_group_check(buildings: list[int], labels: pd.DataFrame) -> pd.DataFrame:
+    """Check of the heat pump curve leaving out a whole group of dwellings.
+
+    For every group of every factor of ``labels`` (columns of attributes, one row per
+    dwelling) the curve is rebuilt from the dwellings outside the group, applied to the
+    useful energy of the dwellings of the group and compared with the electricity of
+    their own package simulations. It shows how the curve transfers to dwellings of
+    another kind, as the dwellings without a package (no ducts) are.
+    """
+    sums, edges = _package_sums(buildings)
+    centers = edges[:-1] + 1.25
+    total = {
+        use: {
+            q: sum(e[use][q] for e in sums.values()) for q in ("useful", "electricity")
+        }
+        for use in ("heat", "cool")
+    }
+    rows = []
+    for factor in labels.columns:
+        for group, members in labels.groupby(factor):
+            ids = [b for b in members.index if b in sums]
+            if len(ids) < 20 or len(ids) > len(sums) - 20:
+                continue
+            curve_kwh = direct_kwh = 0.0
+            for use in ("heat", "cool"):
+                useful = total[use]["useful"] - sum(sums[b][use]["useful"] for b in ids)
+                electricity = total[use]["electricity"] - sum(
+                    sums[b][use]["electricity"] for b in ids
+                )
+                keep = (useful > 1.0) & (electricity > 0)
+                curve = pd.DataFrame(
+                    {"t_out": centers[keep], "cop": useful[keep] / electricity[keep]}
+                )
+                for b in ids:
+                    curve_kwh += hp.electricity_from_useful(
+                        sums[b][use]["series"], sums[b]["t"], curve
+                    ).sum()
+                    direct_kwh += sums[b][use]["direct"]
+            rows.append(
+                {
+                    "factor": factor,
+                    "group": group,
+                    "dwellings": len(ids),
+                    "direct_kwh": direct_kwh * KWH,
+                    "curve_kwh": curve_kwh * KWH,
+                    "error": curve_kwh / direct_kwh - 1,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def curve_check(buildings: list[int]) -> pd.DataFrame:
+    """Leave-one-dwelling-out check of the heat pump curve against the package run.
+
+    For every dwelling with a package simulation the curve is rebuilt from the bin
+    sums of all the other dwellings, applied to its useful energy and compared with
+    the electricity that its own simulation used (heating, cooling and fans).
+    """
+    sums, edges = _package_sums(buildings)
     total = {
         use: {
             q: sum(e[use][q] for e in sums.values()) for q in ("useful", "electricity")
@@ -1073,6 +1130,22 @@ def validate(table: pd.DataFrame, summary: pd.DataFrame, draws: pd.DataFrame) ->
             100 * (check["curve_kwh"].sum() / check["direct_kwh"].sum() - 1),
             100 * check["error"].abs().median(),
         )
+    stock = climate_fit.read_dwellings(config.STATE)
+    stock = stock[stock["occupied"]].set_index("building_id")
+    labels = stock.loc[
+        stock.index.intersection(table.index),
+        [
+            "building_type",
+            "heating_fuel",
+            "vintage",
+            "cooling_type",
+            "tenure",
+            "county",
+        ],
+    ]
+    groups = curve_group_check(sorted(table.index), labels)
+    groups.to_csv(TABLES / f"heat_pump_curve_group_check_{STATE}.csv", index=False)
+    logging.info("curve left-group-out check: %d groups", len(groups))
 
 
 def run() -> None:
