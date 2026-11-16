@@ -104,6 +104,36 @@ MIN_DONORS = 1
 # Uncertainty of the energy of each tract: number of simulations and the seed of
 # the random generator (the same seed gives the same simulations).
 N_DRAWS = 200
+# Weights of the dwellings that also match the Census counts of the fuel, the bedrooms
+# and the household size (script 04_reweighting.py); the change of the mean of each
+# tract against the weights of the type alone is the composition error of script
+# 07_gap_by_tract.py. Valid for any state with the same Census tables.
+COMPOSITION_VARIANT = "type_fuel_bedrooms_size"
+# Quantities (gaps between the normative and the current energy) for which a slope of
+# their own against the degree days is tried as the climate correction of the tract
+# (script 07_gap_by_tract.py); it is applied only where it lowers the median error of
+# the known-population test. The slope is fitted with the counties of the state alone.
+GAP_ADDITIVE_CANDIDATES = ("gap_heating", "gap_cooling")
+# Quantities that are the sum of two others in every tract (script 07_gap_by_tract.py):
+# the gap is the sum of its parts and the normative energy is the energy used today
+# plus the gap, each with its own climate correction, so that they add up.
+DERIVED_QUANTITIES = {
+    "gap_heating": ("gap_over_heating", "gap_under_heating"),
+    "gap_cooling": ("gap_over_cooling", "gap_under_cooling"),
+    "norm_heating": ("cur_heating", "gap_heating"),
+    "norm_cooling": ("cur_cooling", "gap_cooling"),
+}
+# The gap of every dwelling is split in whether it has a gap (more than this many kWh
+# a year; with 1 or 50 the conclusions are the same), the gap of those that have one
+# and the rest. The three columns are named with these prefixes plus the use, are not
+# corrected for climate and are mixed with the mean of the state (script
+# 07_gap_by_tract.py).
+GAP_THRESHOLD_KWH = 10.0
+SPLIT_PREFIXES = ("gap_share_", "gap_over_", "gap_under_")
+# Test of units as small as a tract: every zone is cut at random in parts of about
+# this many dwellings, repeated with this many seeds.
+MINI_TRACT_SIZE = 40
+MINI_TRACT_SEEDS = 3
 SEED = 2026
 
 # 2020 Census occupied housing units by block (table H3) and the 2010-2020 block

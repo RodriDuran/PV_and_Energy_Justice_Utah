@@ -34,10 +34,12 @@ import pandas as pd
 from utah_ejpi.resstock import FUEL_COLUMNS
 
 __all__ = [
+    "AdditiveSlope",
     "DegreeDaySensitivity",
     "build_tract_type_energy",
     "climate_factor",
     "donor_level_energy",
+    "fit_additive_slope",
     "fit_degree_day_sensitivity",
     "leave_one_county_out",
     "tract_energy_summary",
@@ -198,6 +200,128 @@ def fit_degree_day_sensitivity(
         intercept=float(coef2[0]),
         slope=float(coef2[1]),
         covariance=cov,
+        n_dwellings=len(sample),
+        n_stations=int(sample["county"].nunique()),
+        dd_min=float(used.min()),
+        dd_max=float(used.max()),
+    )
+
+
+@dataclass(frozen=True)
+class AdditiveSlope:
+    """Change of a per-dwelling quantity with the degree days of the station.
+
+    Unlike :class:`DegreeDaySensitivity`, the quantity moves by a fixed amount per
+    thousand degree days instead of by a ratio, so it can be zero or negative (a
+    gap between two energy uses, for example).
+
+    Attributes
+    ----------
+    end_use : str
+        ``"heating"`` or ``"cooling"``: the degree days that apply.
+    slope : float
+        Change of the quantity per thousand degree days.
+    variance : float
+        Variance of the slope, robust to the correlation of the dwellings of a same
+        county.
+    n_dwellings, n_stations : int
+        Dwellings and stations used in the fit.
+    dd_min, dd_max : float
+        Range of degree days of the stations used in the fit, in thousands.
+    """
+
+    end_use: str
+    slope: float
+    variance: float
+    n_dwellings: int
+    n_stations: int
+    dd_min: float
+    dd_max: float
+
+
+def fit_additive_slope(
+    values: pd.Series,
+    dwellings: pd.DataFrame,
+    station_degree_days: pd.DataFrame,
+    end_use: str,
+    controls: tuple[str, ...] = DEFAULT_CONTROLS,
+) -> AdditiveSlope:
+    """Estimate how a quantity per dwelling changes with the degree days.
+
+    The quantity is regressed on the controls (dummy variables) and on the degree
+    days of the weather station of the county; the coefficient of the degree days
+    is the slope. The controls are used only to estimate it.
+
+    Parameters
+    ----------
+    values : pandas.Series
+        Quantity per modeled dwelling, indexed by ``building_id``. Dwellings with a
+        missing value are left out.
+    dwellings : pandas.DataFrame
+        Contract ``resstock_dwellings`` (occupied dwellings are used) with the
+        control columns.
+    station_degree_days : pandas.DataFrame
+        Degree days of the weather stations, contract ``climate_degree_days``
+        with kind ``"station"`` and ``id`` equal to the county code of ResStock.
+    end_use : {"heating", "cooling"}
+        Use of energy, which sets the degree days.
+    controls : tuple of str
+        Columns of ``dwellings`` that describe the dwelling and are not climate.
+
+    Returns
+    -------
+    AdditiveSlope
+        Slope, its variance and the range of the degree days.
+
+    Raises
+    ------
+    KeyError
+        If the use of energy is unknown.
+    ValueError
+        If a county of the dwellings has no station or fewer than two counties
+        remain.
+
+    Notes
+    -----
+    The slope comes from differences between counties, so it assumes that, once the
+    controls are taken into account, the counties differ in the quantity only
+    through climate. With few counties of high degree days it rests on them; the
+    range of the fit is returned so that the caller does not extrapolate.
+
+    Examples
+    --------
+    >>> frame = pd.DataFrame({
+    ...     "building_id": range(6), "occupied": True,
+    ...     "county": ["a", "a", "b", "b", "c", "c"], "tenure": "Owner",
+    ... })
+    >>> stations = pd.DataFrame({
+    ...     "id": ["a", "b", "c"], "kind": "station", "cdd": [0.0, 1000.0, 2000.0],
+    ... })
+    >>> y = pd.Series([1.0, 1.0, 3.0, 3.0, 5.0, 5.0], index=range(6))
+    >>> fit = fit_additive_slope(y, frame, stations, "cooling", ("tenure",))
+    >>> round(fit.slope, 6)
+    2.0
+    """
+    _, dd_col = END_USES[end_use]
+    stations = station_degree_days[station_degree_days["kind"] == "station"]
+    dd_by_county = stations.set_index("id")[dd_col]
+    sample = dwellings[dwellings["occupied"]].set_index("building_id")
+    sample = sample.loc[sample.index.intersection(values.dropna().index)].copy()
+    missing = set(sample["county"]) - set(dd_by_county.index)
+    if missing:
+        raise ValueError(f"Counties without a weather station: {sorted(missing)[:3]}")
+    if sample["county"].nunique() < 2:
+        raise ValueError("The slope needs dwellings of at least two counties.")
+    sample["dd"] = sample["county"].map(dd_by_county).astype(float) / UNIT
+    x = np.hstack([_design(sample, controls), sample[["dd"]].to_numpy()])
+    y = values.loc[sample.index].to_numpy(dtype=float)
+    coef, *_ = np.linalg.lstsq(x, y, rcond=None)
+    cov = _cluster_covariance(x, y - x @ coef, sample["county"].to_numpy())
+    used = stations[stations["id"].isin(sample["county"])][dd_col] / UNIT
+    return AdditiveSlope(
+        end_use=end_use,
+        slope=float(coef[-1]),
+        variance=float(cov[-1, -1]),
         n_dwellings=len(sample),
         n_stations=int(sample["county"].nunique()),
         dd_min=float(used.min()),

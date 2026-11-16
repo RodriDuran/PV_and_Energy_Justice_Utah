@@ -21,25 +21,56 @@ sum stay linked: the gap travels with the donor.
 
 The counts of dwellings by type, the coefficients of the climate line and the
 error of transferring dwellings between areas are simulated as in
-:func:`utah_ejpi.uncertainty.simulate_tract_energy`. Whether the climate line
-corrects each quantity is an argument, because it has to be decided for the gap
-with the known-population test, not assumed.
+:func:`utah_ejpi.uncertainty.simulate_tract_energy`.
+
+Two more sources describe how a tract can differ from the mean of its type in its
+zone. The composition of the tract in variables that the type does not include
+(heating fuel, bedrooms, household size) moves its mean by the difference between
+the means with and without the Census counts of those variables
+(:func:`composition_shift`). The zone itself can differ from what the type predicts
+(a common level of thermostat habits, for example): its standard deviation is
+estimated from the modeled dwellings with :func:`zone_effect_sd` and one random
+factor per zone is shared by all its tracts. The location effect that the
+covariates do not capture is the main risk of the methods that transfer a model to
+small areas (Elbers et al. 2002; Demombynes et al. 2007; Naidoo 2010).
+
+Whether the climate line corrects each quantity is an argument, because it has to
+be decided for the gap with the known-population test, not assumed.
+
+A quantity whose estimate by tract is no better than the mean of the state (the gap
+of heating, in the known-population tests) can be moved toward that mean: the center
+of a tract is a weighted mean of its own estimate and the mean of all the modeled
+dwellings, the form of the composite estimators of small-area estimation (Rao and
+Molina 2015; Pfeffermann 2013). The weight that minimizes the squared error is
+estimated with units whose truth is known (:func:`composite_weight`) and applied to
+the simulations with :func:`shrink_draws`, which moves the center and keeps the spread
+of the simulations: the error of the mean of a tract with respect to its true value is
+not reduced by the mix, so the interval keeps the width that the known-population test
+validated.
 
 References
 ----------
 Rubin (1981), The Bayesian bootstrap (``rubin_1981_bayesian_bootstrap``, NO
-VERIFICADO); Elbers et al. (2002, ``elbers_2002_micro_level_welfare``).
+VERIFICADO); Elbers et al. (2002, ``elbers_2002_micro_level_welfare``); Rao and
+Molina (2015, ``rao_molina_2015_sae``); Pfeffermann (2013, ``pfeffermann_2013_sae``).
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 from utah_ejpi.climate import rank_pumas_by_climate
-from utah_ejpi.energy_requirement import END_USES, UNIT, DegreeDaySensitivity
+from utah_ejpi.energy_requirement import (
+    END_USES,
+    UNIT,
+    AdditiveSlope,
+    DegreeDaySensitivity,
+    fit_additive_slope,
+)
 from utah_ejpi.housing_stock import build_type_donors
 from utah_ejpi.uncertainty import (
     Z90,
@@ -49,10 +80,180 @@ from utah_ejpi.uncertainty import (
 )
 
 __all__ = [
+    "Shrinkage",
+    "composite_weight",
+    "composition_shift",
+    "shrink_draws",
     "estimate_transfer_tau_quantities",
     "known_population_quantities",
     "simulate_tract_quantities",
+    "zone_effect_sd",
 ]
+
+
+@dataclass(frozen=True)
+class Shrinkage:
+    """Weight of a quantity toward the mean of the state.
+
+    The center of a tract is ``weight * own + (1 - weight) * anchor``.
+
+    Attributes
+    ----------
+    weight : float
+        Weight of the own estimate of the tract, between 0 and 1.
+    weight_sd : float
+        Standard deviation of the weight (it is drawn in every simulation, the same
+        for every tract, in :func:`shrink_draws`).
+    anchor : float
+        Value toward which the estimate is shrunk, the mean of the modeled dwellings.
+    """
+
+    weight: float
+    weight_sd: float
+    anchor: float
+
+
+def composite_weight(
+    estimate: pd.Series | np.ndarray,
+    anchor: pd.Series | np.ndarray,
+    truth: pd.Series | np.ndarray,
+    groups: pd.Series | np.ndarray | None = None,
+    n_boot: int = 500,
+    seed: int = 2026,
+) -> tuple[float, float]:
+    """Weight of the own estimate that minimizes the squared error of the mix.
+
+    For units whose true mean is known, the weight ``w`` of
+    ``w * estimate + (1 - w) * anchor`` that minimizes the sum of the squared
+    errors is ``sum((e - a) * (t - a)) / sum((e - a)**2)``, kept between 0 and 1.
+    Its standard deviation comes from resampling the groups (the zones, if the
+    units are parts of them), which are the independent pieces of the test.
+
+    Parameters
+    ----------
+    estimate, anchor, truth : array-like
+        For every unit, the estimate with its own donors, the mean of the other
+        dwellings (the mean of the state) and the true mean.
+    groups : array-like, optional
+        Group of every unit; units of a group are resampled together. Without it
+        the units are resampled one by one.
+    n_boot : int
+        Number of resamples.
+    seed : int
+        Seed of the random generator.
+
+    Returns
+    -------
+    tuple of float
+        ``(weight, weight_sd)``.
+
+    Raises
+    ------
+    ValueError
+        If the inputs differ in length, have fewer than two units or the estimates
+        equal the anchor everywhere.
+
+    Examples
+    --------
+    >>> w, sd = composite_weight([2.0, 4.0, 6.0], [4.0, 4.0, 4.0], [3.0, 4.0, 5.0])
+    >>> round(w, 3)
+    0.5
+    """
+    e = np.asarray(estimate, dtype=float)
+    a = np.asarray(anchor, dtype=float)
+    t = np.asarray(truth, dtype=float)
+    if not (len(e) == len(a) == len(t)) or len(e) < 2:
+        raise ValueError(
+            "estimate, anchor and truth need the same length (two or more)."
+        )
+    ok = np.isfinite(e) & np.isfinite(a) & np.isfinite(t)
+    e, a, t = e[ok], a[ok], t[ok]
+    g = np.arange(len(e)) if groups is None else pd.factorize(np.asarray(groups)[ok])[0]
+
+    def weight(idx: np.ndarray) -> float:
+        d = e[idx] - a[idx]
+        denominator = float((d**2).sum())
+        if denominator == 0.0:
+            raise ValueError("The estimates equal the anchor everywhere.")
+        return float(np.clip((d * (t[idx] - a[idx])).sum() / denominator, 0.0, 1.0))
+
+    value = weight(np.arange(len(e)))
+    rng = np.random.default_rng(seed)
+    members = [np.flatnonzero(g == k) for k in range(g.max() + 1)]
+    boot = []
+    for _ in range(n_boot):
+        pick = rng.integers(0, len(members), len(members))
+        idx = np.concatenate([members[k] for k in pick])
+        if float(((e[idx] - a[idx]) ** 2).sum()) > 0.0:
+            boot.append(weight(idx))
+    return value, float(np.std(boot, ddof=1)) if len(boot) > 1 else 0.0
+
+
+def shrink_draws(
+    draws: pd.DataFrame,
+    shrink: Mapping[str, Shrinkage],
+    derived: Mapping[str, tuple[str, str]] | None = None,
+    seed: int = 2026,
+) -> pd.DataFrame:
+    """Move the center of the simulations of some quantities toward their anchor.
+
+    For every tract and group, the simulations of a quantity are shifted by
+    ``(1 - w) * (anchor - mean)``, with ``mean`` the mean of its simulations and
+    ``w`` the weight of the simulation. The weight is drawn in every simulation
+    (normal with the standard deviation of the rule, kept between 0 and 1), with the
+    same standard normal number for every quantity and tract. The spread of the
+    simulations around their mean does not change, so the interval keeps the width
+    that the known-population test validated. Quantities that are the sum of others
+    are then recomputed.
+
+    Parameters
+    ----------
+    draws : pandas.DataFrame
+        Output of :func:`simulate_tract_quantities`, with ``GEOID``, ``group`` and
+        ``draw``.
+    shrink : mapping of str to Shrinkage
+        Rule of every quantity moved.
+    derived : mapping of str to tuple of str, optional
+        Quantities that are the sum of two others, recomputed in the order given
+        after the shift (as in :func:`simulate_tract_quantities`).
+    seed : int
+        Seed of the random generator.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A copy of ``draws`` with the shifted and recomputed quantities.
+
+    Raises
+    ------
+    ValueError
+        If a quantity of ``shrink`` or ``derived`` is not in the simulations.
+
+    Examples
+    --------
+    >>> draws = pd.DataFrame({"GEOID": ["a"] * 2, "group": "all", "draw": [0, 1],
+    ...                       "q": [1.0, 3.0]})
+    >>> out = shrink_draws(draws, {"q": Shrinkage(0.5, 0.0, 10.0)})
+    >>> out["q"].tolist()
+    [6.0, 8.0]
+    """
+    needed = {*shrink, *(derived or {})}
+    for parts in (derived or {}).values():
+        needed.update(parts)
+    if not needed <= set(draws.columns):
+        raise ValueError("The simulations do not have every quantity named.")
+    out = draws.copy()
+    rng = np.random.default_rng(seed)
+    draw_ids = np.sort(out["draw"].unique())
+    z = pd.Series(rng.standard_normal(len(draw_ids)), index=draw_ids)
+    z = out["draw"].map(z).to_numpy()
+    for name, rule in shrink.items():
+        mean = out.groupby(["GEOID", "group"])[name].transform("mean")
+        weight = np.clip(rule.weight + rule.weight_sd * z, 0.0, 1.0)
+        out[name] = out[name] + (1.0 - weight) * (rule.anchor - mean)
+    for name, (first_part, second_part) in (derived or {}).items():
+        out[name] = out[first_part] + out[second_part]
+    return out
 
 
 def simulate_tract_quantities(
@@ -73,6 +274,11 @@ def simulate_tract_quantities(
     transfer_tau: dict[str, float] | None = None,
     transfer_groups: pd.Series | None = None,
     resample: bool = True,
+    zone_effect_sd: Mapping[str, float] | None = None,
+    zone_of: pd.Series | None = None,
+    composition_shift: pd.DataFrame | None = None,
+    climate_additive: Mapping[str, AdditiveSlope] | None = None,
+    derived: Mapping[str, tuple[str, str]] | None = None,
 ) -> pd.DataFrame:
     """Simulate the mean per dwelling of dwelling-level quantities in every tract.
 
@@ -125,6 +331,35 @@ def simulate_tract_quantities(
         Resample the donors of each cell (Bayesian bootstrap). With ``False`` the
         weights are the donor weights in every simulation, which isolates the
         other sources of error.
+    zone_effect_sd : mapping of str to float, optional
+        Relative standard deviation of the zone effect, by quantity (see
+        :func:`zone_effect_sd`). In every simulation each zone draws one lognormal
+        factor of mean one that multiplies the quantity in all its tracts; the
+        quantities of a use share the random number of the zone. Needs
+        ``zone_of``.
+    zone_of : pandas.Series, optional
+        Zone of every tract (index ``GEOID``).
+    composition_shift : pandas.DataFrame, optional
+        Output of :func:`composition_shift`: for each tract (index ``GEOID``) and
+        quantity (columns), the signed change of the mean per dwelling when the
+        Census counts of the variables outside the type are used. In every
+        simulation each tract draws one standard normal number ``u`` and adds
+        ``u`` times the change to its quantities, the same ``u`` for all of them,
+        so the sum of two quantities moves as the sum of their changes.
+    climate_additive : mapping of str to AdditiveSlope, optional
+        For the quantities named, the value of every dwelling moves by the slope
+        times the difference of degree days between the tract and the station of the
+        dwelling (instead of being multiplied by the ratio of the climate line). The
+        degree days of the tract are kept inside the range of the fit. The slope is
+        drawn in every simulation from its variance. A quantity cannot be in this
+        mapping and in ``climate_corrected``.
+    derived : mapping of str to tuple of str, optional
+        Quantities that are the sum of two others, as ``{"norm": ("current",
+        "gap")}``. In every simulation they are set to the sum of the two others after
+        all the corrections and errors, so that the sum holds in every tract and
+        simulation even when the two parts are corrected differently. Their own
+        correction and errors are not used. They are computed in the order given, so
+        a quantity can be the sum of a derived one.
 
     Returns
     -------
@@ -137,7 +372,9 @@ def simulate_tract_quantities(
     ------
     ValueError
         If the quantities and the uses do not match, a use is unknown, a tract has
-        no total or no transfer group, or no cell has a valid donor.
+        no total or no transfer group, a zone effect has no zone for a tract, a
+        quantity has both climate corrections, a derived quantity is not the sum of
+        two quantities of the same use, or no cell has a valid donor.
 
     Notes
     -----
@@ -151,6 +388,19 @@ def simulate_tract_quantities(
         raise ValueError("Every use must be 'heating' or 'cooling'.")
     if transfer_tau is not None and transfer_groups is None:
         raise ValueError("transfer_tau needs transfer_groups.")
+    if zone_effect_sd is not None and zone_of is None:
+        raise ValueError("zone_effect_sd needs zone_of.")
+    additive = dict(climate_additive or {})
+    if set(additive) & set(climate_corrected):
+        raise ValueError("A quantity cannot have both climate corrections.")
+    if not set(additive) <= set(quantities.columns):
+        raise ValueError("climate_additive names a quantity that is not in quantities.")
+    derived = dict(derived or {})
+    for name, parts_of in derived.items():
+        if len(parts_of) != 2 or not {name, *parts_of} <= set(quantities.columns):
+            raise ValueError("A derived quantity needs two quantities that exist.")
+        if len({uses[name], *(uses[c] for c in parts_of)}) != 1:
+            raise ValueError("A derived quantity and its parts must share the use.")
     rng = np.random.default_rng(seed)
     names = list(quantities.columns)
     keys = ["GEOID", "tenure", "vintage", "building_type"]
@@ -223,6 +473,23 @@ def simulate_tract_quantities(
         if (group_codes < 0).any():
             raise ValueError("Some tracts have no transfer group.")
 
+    tract_codes = np.repeat(
+        np.arange(len(tract_ids)), np.diff(np.r_[tract_start, len(cells)])
+    )
+    if zone_effect_sd is not None:
+        zone_codes, zone_names = pd.factorize(pd.Series(cell_tract).map(zone_of))
+        if (zone_codes < 0).any():
+            raise ValueError("Some tracts have no zone.")
+    if composition_shift is not None:
+        shift_cell = {
+            name: composition_shift[name]
+            .reindex(tract_ids)
+            .fillna(0.0)
+            .to_numpy(float)[tract_codes]
+            for name in names
+            if name in composition_shift
+        }
+
     parts = []
     for first in range(0, n_draws, chunk):
         size = min(chunk, n_draws - first)
@@ -244,6 +511,14 @@ def simulate_tract_quantities(
                 line_t = np.clip(a + b * dd_t[use][:, None], 0.0, None)
                 line_s = a + b * dd_s[use][:, None]
                 row_value = values[name][:, None] * (line_t / line_s)
+            elif name in additive:
+                fit = additive[name]
+                slope = fit.slope + np.sqrt(fit.variance) * rng.standard_normal(size)
+                dd_tract = np.clip(dd_t[use], fit.dd_min, fit.dd_max)
+                row_value = (
+                    values[name][:, None]
+                    + slope[None, :] * (dd_tract - dd_s[use])[:, None]
+                )
             else:
                 row_value = np.repeat(values[name][:, None], size, axis=1)
             energy[name] = np.add.reduceat(row_value * share, starts, axis=0)
@@ -258,6 +533,21 @@ def simulate_tract_quantities(
                     energy[name] = energy[name] * np.where(
                         borrowed[:, None], factor, 1.0
                     )
+
+        if zone_effect_sd is not None:
+            for use in ("heating", "cooling"):
+                z = rng.standard_normal((len(zone_names), size))[zone_codes]
+                for name in names:
+                    sd = zone_effect_sd.get(name)
+                    if uses[name] != use or not sd:
+                        continue
+                    energy[name] = energy[name] * np.exp(sd * z - sd**2 / 2)
+        if composition_shift is not None:
+            u = rng.standard_normal((len(tract_ids), size))[tract_codes]
+            for name, delta in shift_cell.items():
+                energy[name] = energy[name] + delta[:, None] * u
+        for name, (first_part, second_part) in derived.items():
+            energy[name] = energy[first_part] + energy[second_part]
 
         count = np.where(
             positive[:, None],
@@ -313,6 +603,10 @@ def known_population_quantities(
     extra_fit_dwellings: Mapping[str, pd.DataFrame] | None = None,
     extra_fit_stations: pd.DataFrame | None = None,
     resample: bool = True,
+    zone_effect_sd: Mapping[str, float] | None = None,
+    additive_candidates: Collection[str] = (),
+    derived: Mapping[str, tuple[str, str]] | None = None,
+    shrink_weights: Mapping[str, tuple[float, float]] | None = None,
 ) -> pd.DataFrame:
     """Estimate each PUMA or county of ResStock without its own dwellings.
 
@@ -339,12 +633,29 @@ def known_population_quantities(
         Contract ``climate_degree_days`` with kind ``"station"``.
     climate_corrected : collection of str
         Quantities corrected with the climate line in the first estimate.
-    unit : {"county", "puma"}
-        Units to leave out one at a time.
+    unit : str
+        Column of ``dwellings`` that defines the units to leave out one at a time:
+        ``"county"``, ``"puma"`` or any other grouping of the dwellings (parts of a
+        zone, for example, to test with units as small as a tract).
     n_draws, seed, transfer_tau, extra_fit_dwellings, extra_fit_stations
         As in :func:`utah_ejpi.uncertainty.known_population_test`.
     resample : bool
         Resample the donors in the simulations.
+    zone_effect_sd : mapping of str to float, optional
+        Zone effect of :func:`simulate_tract_quantities`; the unit left out is its
+        own zone, so it draws one factor per simulation.
+    derived : mapping of str to tuple of str, optional
+        Quantities that are the sum of two others, as in
+        :func:`simulate_tract_quantities`; applied in the estimate with the climate
+        correction and in the one with the own slope.
+    shrink_weights : mapping of str to tuple of float, optional
+        For each quantity named, the weight and its standard deviation of
+        :class:`Shrinkage`; the anchor of each unit is the mean of the dwellings
+        outside it. Applied in every estimate.
+    additive_candidates : collection of str
+        Quantities for which the correction with their own slope of the degree days
+        (see :func:`utah_ejpi.energy_requirement.fit_additive_slope`, fitted without
+        the unit left out) is also estimated.
 
     Returns
     -------
@@ -353,15 +664,19 @@ def known_population_quantities(
         ``q``: ``truth_q``, ``estimate_q`` (mean of the simulations, with the
         climate correction of ``climate_corrected``), ``lo_q`` and ``hi_q`` (90 %
         interval), ``no_climate_q`` (mean without any correction) and ``state_q``
-        (mean of all the other dwellings, ignoring types).
+        (mean of all the other dwellings, ignoring types). For every quantity of
+        ``additive_candidates``, also ``additive_q`` (mean of the simulations with
+        the correction of its own slope, without the correction of the line of the
+        use) and ``additive_lo_q`` and ``additive_hi_q`` (its 90 % interval).
 
     Raises
     ------
     ValueError
-        If the unit is unknown or the dwellings span more than one upgrade.
+        If the unit is not a column of the dwellings or the dwellings span more than
+        one upgrade.
     """
-    if unit not in ("county", "puma"):
-        raise ValueError("unit must be 'county' or 'puma'.")
+    if unit not in dwellings.columns:
+        raise ValueError("unit must be a column of dwellings.")
     if dwellings["upgrade"].nunique() != 1:
         raise ValueError("Pass the dwellings of one upgrade.")
     names = list(quantities.columns)
@@ -434,7 +749,24 @@ def known_population_quantities(
             {"GEOID": [name], "total": [float(len(truth_stock))], "total_moe": [0.0]}
         )
         runs = {}
-        for label, corrected in (("with", climate_corrected), ("without", ())):
+        slopes = {
+            q: fit_additive_slope(quantities[q], rest, station_degree_days, uses[q])
+            for q in additive_candidates
+        }
+        rules = (
+            {
+                q: Shrinkage(
+                    w, sd, float(quantities.loc[rest["building_id"], q].mean())
+                )
+                for q, (w, sd) in shrink_weights.items()
+            }
+            if shrink_weights
+            else None
+        )
+        variants = [("with", climate_corrected, None), ("without", (), None)]
+        if slopes:
+            variants.append(("additive", (), slopes))
+        for label, corrected, additive in variants:
             runs[label] = simulate_tract_quantities(
                 weights,
                 donors,
@@ -452,8 +784,16 @@ def known_population_quantities(
                 transfer_tau=transfer_tau,
                 transfer_groups=pd.Series({name: name}) if transfer_tau else None,
                 resample=resample,
+                zone_effect_sd=zone_effect_sd,
+                zone_of=pd.Series({name: name}) if zone_effect_sd else None,
+                climate_additive=additive,
+                derived=derived if label != "without" else None,
             )
             runs[label] = runs[label][runs[label]["group"] == "all"]
+            if rules:
+                runs[label] = shrink_draws(
+                    runs[label], rules, derived if label != "without" else None, seed
+                )
         row = {"unit": name, "dwellings": len(truth_stock)}
         for q in names:
             ids_in, ids_rest = truth_stock["building_id"], rest["building_id"]
@@ -464,6 +804,11 @@ def known_population_quantities(
             row[f"hi_{q}"] = float(sim.quantile(0.95))
             row[f"no_climate_{q}"] = float(runs["without"][q].dropna().mean())
             row[f"state_{q}"] = float(quantities.loc[ids_rest, q].mean())
+            if q in slopes:
+                added = runs["additive"][q].dropna()
+                row[f"additive_{q}"] = float(added.mean())
+                row[f"additive_lo_{q}"] = float(added.quantile(0.05))
+                row[f"additive_hi_{q}"] = float(added.quantile(0.95))
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -520,3 +865,137 @@ def estimate_transfer_tau_quantities(
         ]
         tau[q] = float(np.sqrt(max((rel**2).mean() - (sd**2).mean(), 0.0)))
     return tau
+
+
+def composition_shift(
+    weights_base: pd.DataFrame,
+    weights_alt: pd.DataFrame,
+    quantities: pd.DataFrame,
+) -> pd.DataFrame:
+    """Change of the mean of each tract when the Census composition is added.
+
+    The type of dwelling does not include the heating fuel, the bedrooms or the
+    size of the household, which the Census counts by tract. Weighting the modeled
+    dwellings so that they also match those counts gives another estimate of the
+    mean of each tract; the difference with the estimate that uses only the type
+    is the size of what the type leaves out.
+
+    Parameters
+    ----------
+    weights_base, weights_alt : pandas.DataFrame
+        Weights of the modeled dwellings in every tract, with ``GEOID``,
+        ``building_id`` and ``weight``: the one that uses the type only and the one
+        that also matches the Census counts of the other variables.
+    quantities : pandas.DataFrame
+        Dwelling-level quantities indexed by ``building_id``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Index ``GEOID``, one column per quantity: mean per dwelling with the
+        alternative weights minus mean with the base weights, signed.
+
+    Examples
+    --------
+    >>> q = pd.DataFrame({"x": [1.0, 3.0]}, index=pd.Index([1, 2], name="building_id"))
+    >>> cols = {"GEOID": ["a", "a"], "building_id": [1, 2]}
+    >>> base = pd.DataFrame({**cols, "weight": [1, 1]})
+    >>> alt = pd.DataFrame({**cols, "weight": [1, 3]})
+    >>> composition_shift(base, alt, q).loc["a", "x"]
+    0.5
+
+    References
+    ----------
+    Elbers et al. (2002, ``elbers_2002_micro_level_welfare``): census means of the
+    variables outside the model capture part of the location effect.
+    """
+
+    def tract_means(weights: pd.DataFrame) -> pd.DataFrame:
+        merged = weights[["GEOID", "building_id", "weight"]].merge(
+            quantities, left_on="building_id", right_index=True, how="inner"
+        )
+        w = merged["weight"].to_numpy(float)
+        weighted = merged[list(quantities.columns)].mul(w, axis=0)
+        weighted["GEOID"] = merged["GEOID"].to_numpy()
+        total = weighted.groupby("GEOID").sum()
+        return total.div(merged.groupby("GEOID")["weight"].sum(), axis=0)
+
+    base, alt = tract_means(weights_base), tract_means(weights_alt)
+    common = base.index.intersection(alt.index)
+    return (alt.loc[common] - base.loc[common]).rename_axis("GEOID")
+
+
+def zone_effect_sd(
+    quantities: pd.DataFrame,
+    zone: pd.Series,
+    categorical: pd.DataFrame,
+    numeric: pd.DataFrame | None = None,
+    with_numeric: Collection[str] = (),
+) -> dict[str, float]:
+    """Relative standard deviation of the zone effect of each quantity.
+
+    The quantity of every modeled dwelling is regressed on the variables that the
+    Census counts (the categorical ones, and the numeric ones for the quantities
+    listed in ``with_numeric``). The mean residual of each zone should be zero if
+    the zones only differ in those variables; its spread, after removing what
+    having few dwellings per zone produces by chance, is the zone effect.
+
+    Parameters
+    ----------
+    quantities : pandas.DataFrame
+        Dwelling-level quantities indexed by ``building_id``.
+    zone : pandas.Series
+        Zone of every dwelling (index ``building_id``).
+    categorical : pandas.DataFrame
+        Categorical variables of every dwelling (index ``building_id``): type of
+        dwelling, heating fuel, bedrooms and size, for example.
+    numeric : pandas.DataFrame, optional
+        Numeric covariates, for example the degree days of the weather station.
+    with_numeric : collection of str
+        Quantities whose regression includes ``numeric`` (those that the model
+        corrects for the climate).
+
+    Returns
+    -------
+    dict
+        Standard deviation of the zone effect over the mean of the quantity.
+
+    Examples
+    --------
+    >>> rng = np.random.default_rng(1)
+    >>> idx = pd.Index(range(4000), name="building_id")
+    >>> zone = pd.Series(np.repeat(np.arange(80), 50), index=idx)
+    >>> effect = pd.Series(np.repeat(rng.normal(0, 2, 80), 50), index=idx)
+    >>> q = pd.DataFrame({"y": 10 + effect + rng.normal(0, 1, 4000)}, index=idx)
+    >>> cat = pd.DataFrame({"t": rng.choice(["a", "b"], 4000)}, index=idx)
+    >>> bool(0.15 < zone_effect_sd(q, zone, cat)["y"] < 0.25)
+    True
+
+    References
+    ----------
+    Elbers et al. (2002, ``elbers_2002_micro_level_welfare``) on the location
+    effect; the moment estimator removes the variance of a mean of ``n`` dwellings.
+    """
+    zone = zone.reindex(quantities.index)
+    base = pd.get_dummies(
+        categorical.reindex(quantities.index).astype(str), drop_first=True
+    ).astype(float)
+    out = {}
+    for name in quantities.columns:
+        design = base.copy()
+        if numeric is not None and name in with_numeric:
+            design = design.join(numeric.reindex(quantities.index))
+        design.insert(0, "const", 1.0)
+        y = quantities[name].to_numpy(float)
+        x = design.to_numpy(float)
+        beta, *_ = np.linalg.lstsq(x, y, rcond=None)
+        resid = y - x @ beta
+        df = max(len(y) - np.linalg.matrix_rank(x), 1)
+        sigma2 = float((resid**2).sum() / df)
+        by_zone = pd.Series(resid, index=quantities.index).groupby(zone.to_numpy())
+        means, counts = by_zone.mean(), by_zone.size()
+        between = float(means.var(ddof=1))
+        expected = float((sigma2 / counts).mean())
+        mean_y = abs(float(np.mean(y)))
+        out[name] = float(np.sqrt(max(between - expected, 0.0)) / mean_y)
+    return out

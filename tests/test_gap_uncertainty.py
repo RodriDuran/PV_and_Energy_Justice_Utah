@@ -5,7 +5,11 @@ import pandas as pd
 import pytest
 
 from utah_ejpi import gap_uncertainty as gu
-from utah_ejpi.energy_requirement import DegreeDaySensitivity
+from utah_ejpi.energy_requirement import (
+    AdditiveSlope,
+    DegreeDaySensitivity,
+    fit_additive_slope,
+)
 
 T1, T2 = "49001000100", "49001000200"
 A = ("Owner", "1980 to 1999", "1")
@@ -229,6 +233,25 @@ def test_known_population_recovers_the_energy_that_follows_the_climate():
     assert (table["lo_gap_cooling"] <= table["hi_gap_cooling"]).all()
 
 
+def test_known_population_with_an_additive_slope_recovers_a_gap_linear_in_the_climate():
+    dwellings, stations, quantities = _population()
+    uses = {"cur_cooling": "cooling", "gap_cooling": "cooling"}
+    table = gu.known_population_quantities(
+        dwellings,
+        quantities,
+        uses,
+        stations,
+        unit="county",
+        n_draws=40,
+        additive_candidates=["gap_cooling"],
+    )
+    assert "additive_cur_cooling" not in table
+    error_additive = (table["additive_gap_cooling"] - table["truth_gap_cooling"]).abs()
+    error_none = (table["no_climate_gap_cooling"] - table["truth_gap_cooling"]).abs()
+    assert error_additive.mean() < 0.5 * error_none.mean()
+    assert (table["additive_lo_gap_cooling"] <= table["additive_hi_gap_cooling"]).all()
+
+
 def test_transfer_deviation_is_the_excess_of_the_error_over_the_simulations():
     table = pd.DataFrame(
         {
@@ -255,3 +278,281 @@ def test_known_population_checks_the_unit_and_the_upgrade():
     mixed = dwellings.assign(upgrade=[0, 1] * (len(dwellings) // 2))
     with pytest.raises(ValueError, match="one upgrade"):
         gu.known_population_quantities(mixed, quantities, uses, stations)
+
+
+def test_zone_effect_is_shared_by_the_tracts_of_a_zone_and_keeps_the_mean():
+    zone_of = pd.Series({T1: "z1", T2: "z1"})
+    base = _run(resample=False, n_draws=4000, seed=3)
+    out = _run(
+        resample=False,
+        n_draws=4000,
+        seed=3,
+        zone_effect_sd={"cur_cooling": 0.3},
+        zone_of=zone_of,
+    )
+    a = out[(out.GEOID == T1) & (out.group == "all")]["cur_cooling"].to_numpy()
+    b = out[(out.GEOID == T2) & (out.group == "all")]["cur_cooling"].to_numpy()
+    a0 = base[(base.GEOID == T1) & (base.group == "all")]["cur_cooling"].to_numpy()
+    b0 = base[(base.GEOID == T2) & (base.group == "all")]["cur_cooling"].to_numpy()
+    assert np.allclose(a / a0, b / b0)
+    assert (a / a0).mean() == pytest.approx(1.0, abs=0.02)
+    assert (a / a0).std() == pytest.approx(0.3, rel=0.1)
+    # a quantity without an entry does not move
+    other = out[(out.GEOID == T1) & (out.group == "all")]["gap_cooling"].to_numpy()
+    assert np.allclose(
+        other, base[(base.GEOID == T1) & (base.group == "all")]["gap_cooling"]
+    )
+    separate = _run(
+        resample=False,
+        n_draws=4000,
+        seed=3,
+        zone_effect_sd={"cur_cooling": 0.3},
+        zone_of=pd.Series({T1: "z1", T2: "z2"}),
+    )
+    s1 = separate[(separate.GEOID == T1) & (separate.group == "all")]["cur_cooling"]
+    s2 = separate[(separate.GEOID == T2) & (separate.group == "all")]["cur_cooling"]
+    assert abs(np.corrcoef(s1, s2)[0, 1]) < 0.1
+
+
+def test_composition_shift_moves_quantities_together_through_one_number():
+    shift = pd.DataFrame(
+        {
+            "cur_cooling": [2.0, 0.0],
+            "gap_cooling": [-1.0, 0.0],
+            "norm_cooling": [1.0, 0.0],
+        },
+        index=pd.Index([T1, T2], name="GEOID"),
+    )
+    base = _run(resample=False, n_draws=3000, seed=4)
+    out = _run(resample=False, n_draws=3000, seed=4, composition_shift=shift)
+    one = out[(out.GEOID == T1) & (out.group == "all")].reset_index(drop=True)
+    zero = base[(base.GEOID == T1) & (base.group == "all")].reset_index(drop=True)
+    u = (one["cur_cooling"] - zero["cur_cooling"]) / 2.0
+    assert u.mean() == pytest.approx(0.0, abs=0.06)
+    assert u.std() == pytest.approx(1.0, rel=0.06)
+    assert np.allclose((one["gap_cooling"] - zero["gap_cooling"]), -1.0 * u)
+    assert np.allclose(one["norm_cooling"], one["cur_cooling"] + one["gap_cooling"])
+    # the tract without change is not moved
+    two = out[(out.GEOID == T2) & (out.group == "all")]["cur_cooling"].to_numpy()
+    assert np.allclose(
+        two, base[(base.GEOID == T2) & (base.group == "all")]["cur_cooling"]
+    )
+
+
+def test_effects_need_their_inputs():
+    with pytest.raises(ValueError, match="zone_of"):
+        _run(zone_effect_sd={"cur_cooling": 0.1})
+    with pytest.raises(ValueError, match="no zone"):
+        _run(zone_effect_sd={"cur_cooling": 0.1}, zone_of=pd.Series({T1: "z"}))
+
+
+def test_composition_shift_is_the_difference_of_the_weighted_means():
+    q = pd.DataFrame(
+        {"x": [1.0, 3.0, 5.0]}, index=pd.Index([1, 2, 3], name="building_id")
+    )
+    cols = {"GEOID": ["a", "a", "b"], "building_id": [1, 2, 3]}
+    base = pd.DataFrame({**cols, "weight": [1.0, 1.0, 2.0]})
+    alt = pd.DataFrame({**cols, "weight": [3.0, 1.0, 5.0]})
+    out = gu.composition_shift(base, alt, q)
+    assert out.loc["a", "x"] == pytest.approx(1.5 - 2.0)
+    assert out.loc["b", "x"] == pytest.approx(0.0)
+
+
+def test_zone_effect_sd_recovers_the_effect_and_finds_none_when_there_is_none():
+    rng = np.random.default_rng(7)
+    idx = pd.Index(range(6000), name="building_id")
+    zone = pd.Series(np.repeat(np.arange(60), 100), index=idx)
+    kind = pd.DataFrame({"t": rng.choice(["a", "b", "c"], 6000)}, index=idx)
+    level = {"a": 8.0, "b": 10.0, "c": 12.0}
+    base = kind["t"].map(level) + rng.normal(0, 3, 6000)
+    effect = pd.Series(np.repeat(rng.normal(0, 1.5, 60), 100), index=idx)
+    q = pd.DataFrame({"with": base + effect, "without": base})
+    sd = gu.zone_effect_sd(q, zone, kind)
+    assert sd["with"] == pytest.approx(1.5 / 10.0, abs=0.04)
+    assert sd["without"] < 0.03
+
+
+def test_additive_correction_moves_the_quantity_by_the_slope_and_keeps_the_rest():
+    slope = AdditiveSlope("cooling", 4.0, 0.0, 10, 3, 0.0, 1.0)
+    out = _run(resample=False, climate_additive={"gap_cooling": slope})
+    # Tract T1: 0.2 thousand degree days against 0.1 at the station.
+    cell = out[(out.GEOID == T1) & (out.group == "Owner")].iloc[0]
+    assert cell["gap_cooling"] == pytest.approx(5.0 + 4.0 * 0.1)
+    assert cell["cur_cooling"] == pytest.approx(10.0)
+
+
+def test_additive_correction_stays_inside_the_range_of_the_fit():
+    slope = AdditiveSlope("cooling", 4.0, 0.0, 10, 3, 0.0, 0.15)
+    out = _run(resample=False, climate_additive={"gap_cooling": slope})
+    cell = out[(out.GEOID == T1) & (out.group == "Owner")].iloc[0]
+    assert cell["gap_cooling"] == pytest.approx(5.0 + 4.0 * (0.15 - 0.1))
+
+
+def test_additive_slope_is_drawn_with_its_variance_and_conflicts_are_refused():
+    slope = AdditiveSlope("cooling", 4.0, 4.0, 10, 3, 0.0, 1.0)
+    out = _run(
+        n_draws=2000, resample=False, climate_additive={"gap_cooling": slope}, seed=3
+    )
+    cell = out[(out.GEOID == T1) & (out.group == "Owner")]["gap_cooling"]
+    assert cell.mean() == pytest.approx(5.4, abs=0.02)
+    assert cell.std() == pytest.approx(0.2, rel=0.1)  # sd 2 times 0.1
+    with pytest.raises(ValueError, match="both climate"):
+        _run(climate_corrected=["gap_cooling"], climate_additive={"gap_cooling": slope})
+    with pytest.raises(ValueError, match="not in quantities"):
+        _run(climate_additive={"other": slope})
+
+
+def test_fit_additive_slope_recovers_the_slope_and_its_range():
+    rng = np.random.default_rng(4)
+    counties = [f"c{i}" for i in range(8)]
+    cdd = dict(zip(counties, np.linspace(0.0, 700.0, 8), strict=True))
+    frame = pd.DataFrame(
+        {
+            "building_id": range(400),
+            "occupied": True,
+            "county": rng.choice(counties, 400),
+            "tenure": rng.choice(["Owner", "Renter"], 400),
+        }
+    )
+    stations = pd.DataFrame(
+        {"id": counties, "kind": "station", "cdd": [cdd[c] for c in counties]}
+    )
+    dd = frame["county"].map(cdd) / 1000.0
+    y = pd.Series(
+        100.0
+        + 30.0 * (frame["tenure"] == "Owner")
+        + 500.0 * dd
+        + rng.normal(0.0, 5.0, 400),
+        index=frame["building_id"],
+    )
+    fit = fit_additive_slope(y, frame, stations, "cooling", ("tenure",))
+    assert fit.slope == pytest.approx(500.0, rel=0.05)
+    assert fit.variance > 0
+    assert (fit.dd_min, fit.dd_max) == pytest.approx((0.0, 0.7))
+    with pytest.raises(ValueError, match="two counties"):
+        fit_additive_slope(
+            y[frame["county"] == "c1"], frame, stations, "cooling", ("tenure",)
+        )
+    with pytest.raises(KeyError):
+        fit_additive_slope(y, frame, stations, "lighting", ("tenure",))
+
+
+def test_a_derived_quantity_is_the_sum_of_its_parts_after_every_correction():
+    inputs = _inputs()
+    inputs["weights"]["source_level"] = ["puma", "county", "puma", "puma"]
+    out = _run(
+        inputs,
+        n_draws=30,
+        seed=7,
+        climate_corrected=["cur_cooling", "norm_cooling"],
+        transfer_tau={"cur_cooling": 0.3, "gap_cooling": 0.5, "norm_cooling": 0.1},
+        transfer_groups=pd.Series({T1: "z", T2: "z"}),
+        zone_effect_sd={"cur_cooling": 0.2, "gap_cooling": 0.4},
+        zone_of=pd.Series({T1: "z", T2: "z"}),
+        derived={"norm_cooling": ("cur_cooling", "gap_cooling")},
+    )
+    assert np.allclose(
+        out["norm_cooling"], out["cur_cooling"] + out["gap_cooling"], atol=1e-9
+    )
+    # the correction of the current energy reaches the derived quantity; the gap's
+    # does not
+    plain = _run(
+        inputs, resample=False, climate_corrected=["cur_cooling"],
+        derived={"norm_cooling": ("cur_cooling", "gap_cooling")},
+    )  # fmt: skip
+    cell = plain[(plain.GEOID == T1) & (plain.group == "Owner")].iloc[0]
+    assert cell["norm_cooling"] == pytest.approx(10.0 * 1.2 / 1.1 + 5.0)
+
+
+def test_a_derived_quantity_needs_existing_parts_of_the_same_use():
+    inputs = _inputs()
+    with pytest.raises(ValueError, match="two quantities"):
+        _run(inputs, derived={"norm_cooling": ("cur_cooling", "other")})
+    inputs["uses"] = {**USES, "gap_cooling": "heating"}
+    with pytest.raises(ValueError, match="share the use"):
+        _run(inputs, derived={"norm_cooling": ("cur_cooling", "gap_cooling")})
+
+
+def test_composite_weight_recovers_the_mix_and_its_limits():
+    anchor = np.full(40, 10.0)
+    estimate = 10.0 + np.linspace(-5.0, 5.0, 40)
+    truth = anchor + 0.4 * (estimate - anchor)
+    weight, sd = gu.composite_weight(estimate, anchor, truth, seed=1)
+    assert weight == pytest.approx(0.4)
+    assert sd == pytest.approx(0.0, abs=1e-9)
+    noisy = (
+        anchor
+        + 0.4 * (estimate - anchor)
+        + np.random.default_rng(2).normal(0.0, 2.0, 40)
+    )
+    weight, sd = gu.composite_weight(
+        estimate, anchor, noisy, groups=np.repeat(np.arange(8), 5), seed=1
+    )
+    assert 0.0 < weight < 1.0 and sd > 0.0
+    assert (
+        gu.composite_weight(estimate, anchor, anchor + 3 * (estimate - anchor))[0]
+        == 1.0
+    )
+    assert (
+        gu.composite_weight(estimate, anchor, anchor - 3 * (estimate - anchor))[0]
+        == 0.0
+    )
+    with pytest.raises(ValueError, match="same length"):
+        gu.composite_weight([1.0], [1.0], [1.0])
+    with pytest.raises(ValueError, match="anchor everywhere"):
+        gu.composite_weight([1.0, 1.0], [1.0, 1.0], [2.0, 3.0])
+
+
+def test_shrinking_moves_the_center_and_keeps_the_spread_and_the_sums():
+    out = _run(n_draws=50, seed=3)
+    derived = {"norm_cooling": ("cur_cooling", "gap_cooling")}
+    rule = gu.Shrinkage(0.5, 0.0, 100.0)
+    moved = gu.shrink_draws(out, {"gap_cooling": rule}, derived)
+    for _, part in moved.groupby(["GEOID", "group"]):
+        same = out.loc[part.index, "gap_cooling"]
+        assert part["gap_cooling"].std() == pytest.approx(same.std())
+        assert part["gap_cooling"].mean() == pytest.approx(0.5 * same.mean() + 50.0)
+    assert np.allclose(
+        moved["norm_cooling"], moved["cur_cooling"] + moved["gap_cooling"], atol=1e-9
+    )
+    assert np.allclose(moved["cur_cooling"], out["cur_cooling"])
+    flat = gu.shrink_draws(out, {"gap_cooling": gu.Shrinkage(0.0, 0.0, 7.0)})
+    assert np.allclose(
+        flat["gap_cooling"]
+        - flat.groupby(["GEOID", "group"])["gap_cooling"].transform("mean"),
+        out["gap_cooling"]
+        - out.groupby(["GEOID", "group"])["gap_cooling"].transform("mean"),
+    )
+    assert np.allclose(flat.groupby(["GEOID", "group"])["gap_cooling"].mean(), 7.0)
+    same = gu.shrink_draws(out, {"gap_cooling": gu.Shrinkage(1.0, 0.0, 7.0)})
+    assert np.allclose(same["gap_cooling"], out["gap_cooling"])
+    with pytest.raises(ValueError, match="every quantity"):
+        gu.shrink_draws(out, {"other": rule})
+
+
+def test_the_weight_is_drawn_once_per_simulation_for_every_tract():
+    out = _run(n_draws=300, resample=False, seed=4)
+    moved = gu.shrink_draws(out, {"gap_cooling": gu.Shrinkage(0.5, 0.2, 100.0)})
+    wide = moved[moved.group == "all"].pivot(
+        index="draw", columns="GEOID", values="gap_cooling"
+    )
+    assert wide.std().min() > 5.0
+    assert np.corrcoef(wide[T1], wide[T2])[0, 1] > 0.99
+
+
+def test_known_population_accepts_any_unit_and_shrinks_toward_the_mean_of_the_rest():
+    dwellings, stations, quantities = _population()
+    uses = {"cur_cooling": "cooling", "gap_cooling": "cooling"}
+    dwellings = dwellings.assign(part=dwellings["county"].astype(str) + "_x")
+    table = gu.known_population_quantities(
+        dwellings,
+        quantities,
+        uses,
+        stations,
+        unit="part",
+        n_draws=20,
+        shrink_weights={"gap_cooling": (0.0, 0.0)},
+    )
+    assert len(table) == 6
+    assert np.allclose(table["estimate_gap_cooling"], table["state_gap_cooling"])
+    assert not np.allclose(table["estimate_cur_cooling"], table["state_cur_cooling"])
