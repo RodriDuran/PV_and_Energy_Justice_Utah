@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Provisional name: the package name is still to be defined by the author.
+name = "utah-ejpi"
+version = "0.0.1"
+description = "Just energy transition for heating and cooling at census-tract level (Utah)."
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31", "pandas>=2.0", "pyarrow>=14"]
+
+[project.optional-dependencies]
+geo = ["geopandas>=0.14"]
+climate = ["tifffile>=2023.1.1", "geopandas>=0.14"]
+validation = ["pypdf>=3", "openpyxl>=3"]
+dev = ["pytest>=7", "ruff>=0.4", "tifffile>=2023.1.1", "geopandas>=0.14", "pypdf>=3", "openpyxl>=3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+utah_ejpi = ["data/*.csv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests", "analysis"]
+extend-exclude = ["data", "archive", "docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "D", "UP", "B"]
+ignore = ["D203", "D213"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D103"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"

@@ -1,0 +1,16 @@
+docs/
+archive/
+data/
+analysis/output/
+.Rproj.user/
+.Rhistory
+.RData
+
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+fort.6
+*.Rproj
