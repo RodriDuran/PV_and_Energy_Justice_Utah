@@ -54,6 +54,18 @@ interval keeps the width validated by the test of the 90 % interval. The gap of 
 tract is the sum of its parts, and the gap of those that have one is its part over
 the share (``gap_magnitude_*``).
 
+The interval of each tract (the one whose coverage section B validates) does not
+include the composition of the tract. The composition is a separate band: the same
+simulations plus the change by composition, summarized in the columns ending in
+``_wide`` of the table by tract and in ``composition_band_<state>.csv``, with the
+number of tracts whose quality class changes. The cooling gap of the dwellings that
+have no cooling (ResStock does not model evaporative coolers, which RECS reports for
+some of them) is reduced in a sensitivity: a share of those dwellings, the total of
+RECS divided by the dwellings without cooling of ResStock, is taken to have a cooler
+that removes their gap (``gap_cooling_evap_*`` and ``norm_cooling_evap_*``;
+parameters in ``evaporative_cooler_sensitivity_<state>.csv``). The central value is
+not changed.
+
 Section D. Checks of the tract results: agreement of the energy used today with the
 estimate of ``03_energy_requirement.py``, stability of the position of the tracts
 under the uncertainty, and a leave-one-dwelling-out check of the efficiency curve of
@@ -371,6 +383,107 @@ def composition(quantities: pd.DataFrame, dwellings: pd.DataFrame) -> pd.DataFra
         int(ok.sum()),
     )
     return shift
+
+
+BAND_COLUMNS = ("lo", "hi", "cv", "quality")
+
+
+def composition_band(
+    summary: pd.DataFrame, wide: pd.DataFrame, columns: list[str]
+) -> pd.DataFrame:
+    """Add the columns of the band with composition and report its effect.
+
+    The wide band is the summary of the simulations plus the composition; it is
+    joined to the summary of the validated interval with the suffix ``_wide``.
+    """
+    keep = ["GEOID", "group"]
+    for q in columns:
+        keep += [f"{q}_{c}" for c in BAND_COLUMNS]
+    renamed = wide[keep].rename(
+        columns={c: f"{c}_wide" for c in keep if c not in ("GEOID", "group")}
+    )
+    out = summary.merge(renamed, on=["GEOID", "group"], how="left")
+    whole = out[out["group"] == "all"]
+    rows = []
+    for q in columns:
+        rows.append(
+            {
+                "quantity": q,
+                "cv_median_validated": float(whole[f"{q}_cv"].median()),
+                "cv_median_with_composition": float(whole[f"{q}_cv_wide"].median()),
+                "tracts": len(whole),
+                "quality_changes": int(
+                    (whole[f"{q}_quality"] != whole[f"{q}_quality_wide"]).sum()
+                ),
+            }
+        )
+    pd.DataFrame(rows).to_csv(TABLES / f"composition_band_{STATE}.csv", index=False)
+    return out
+
+
+def evaporative_sensitivity(
+    summary: pd.DataFrame, dwellings: pd.DataFrame, quantities: pd.DataFrame
+) -> pd.DataFrame:
+    """Reduce the cooling gap of the dwellings without cooling by a share of them.
+
+    RECS gives the share of the households of the state that have an evaporative
+    cooler as main equipment (with its jackknife error); ResStock has no such
+    equipment and models those dwellings with no cooling. If all of them are among
+    the dwellings of ResStock without cooling, the share of those that have a cooler
+    is the RECS share over the share of ResStock's dwellings without cooling. Who has
+    a cooler is not known, so the same share applies to every tract, and the cooler
+    is taken to remove the gap of the dwelling (an upper bound of the reduction).
+    The central value of the table is not changed; the reduced values are columns.
+    """
+    recs = validation.read_recs(
+        config.RAW / "recs_2020" / "recs2020_public_v7.csv", config.STATE
+    )
+    share, se = validation.recs_share(recs, "ACEQUIPM_PUB", 6)
+    stock = dwellings[dwellings["occupied"]].set_index("building_id")
+    without = (stock["cooling_type"] == "None").astype(float)
+    weight = stock["weight"]
+    none_share = float((without * weight).sum() / weight.sum())
+    high = share + 1.645 * se
+    f_central, f_high = min(1.0, share / none_share), min(1.0, high / none_share)
+    base = pd.read_csv(
+        config.INTERIM / f"tract_dwelling_weights_type_{STATE}.csv",
+        dtype={"GEOID": str},
+    )
+    base = base[base["building_id"].isin(quantities.index)]
+    gap_no_cooling = quantities["gap_cooling"] * without.reindex(quantities.index)
+    base = base.assign(
+        gap=base["building_id"].map(gap_no_cooling).fillna(0.0) * base["weight"]
+    )
+    by_tract = (
+        base.groupby("GEOID")["gap"].sum() / base.groupby("GEOID")["weight"].sum()
+    )
+    whole = summary["group"] == "all"
+    noac = summary["GEOID"].map(by_tract).where(whole)
+    out = summary.assign(gap_cooling_noac=noac)
+    for tag, f in (("central", f_central), ("max", f_high)):
+        out[f"gap_cooling_evap_{tag}"] = out["gap_cooling"] - f * noac
+        out[f"norm_cooling_evap_{tag}"] = out["norm_cooling"] - f * noac
+    mean_gap = float(out.loc[whole, "gap_cooling"].mean())
+    pd.DataFrame(
+        [
+            {
+                "recs_evaporative_share": share,
+                "recs_evaporative_share_se": se,
+                "recs_households": len(recs),
+                "recs_evaporative_households": int((recs["ACEQUIPM_PUB"] == 6).sum()),
+                "resstock_share_without_cooling": none_share,
+                "share_of_those_with_cooler": f_central,
+                "share_of_those_with_cooler_upper_90": f_high,
+                "gap_cooling_reduction_central": float(
+                    f_central * out.loc[whole, "gap_cooling_noac"].mean() / mean_gap
+                ),
+                "gap_cooling_reduction_max": float(
+                    f_high * out.loc[whole, "gap_cooling_noac"].mean() / mean_gap
+                ),
+            }
+        ]
+    ).to_csv(TABLES / f"evaporative_cooler_sensitivity_{STATE}.csv", index=False)
+    return out
 
 
 SPLIT = tuple(f"{p}{u}" for p in config.SPLIT_PREFIXES for u in ("heating", "cooling"))
@@ -826,25 +939,31 @@ def simulate(table: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         transfer_groups=main_puma,
         zone_effect_sd=zone_sd,
         zone_of=main_puma,
-        composition_shift=shift,
         climate_additive=own_slopes,
         derived=config.DERIVED_QUANTITIES,
     )
     draws = gu.shrink_draws(draws, shrink, config.DERIVED_QUANTITIES, seed=config.SEED)
-    for use in ("heating", "cooling"):
-        share = draws[f"gap_share_{use}"]
-        draws[f"gap_magnitude_{use}"] = draws[f"gap_over_{use}"] / share.where(
-            share > 0
-        )
+    wide = gu.add_composition_draws(
+        draws, shift, config.DERIVED_QUANTITIES, seed=config.SEED
+    )
+    for frame in (draws, wide):
+        for use in ("heating", "cooling"):
+            share = frame[f"gap_share_{use}"]
+            frame[f"gap_magnitude_{use}"] = frame[f"gap_over_{use}"] / share.where(
+                share > 0
+            )
     draws.to_parquet(config.INTERIM / f"tract_gap_draws_{STATE}.parquet", index=False)
     sources = source_decomposition(
         weights, donors, dwellings, quantities, uses, totals, degree_days,
         heating, cooling, corrected, tau, main_puma, zone_sd, shift, own_slopes,
     )  # fmt: skip
     logging.info("variance share of each source:\n%s", sources.round(2).to_string())
-    summary = uncertainty.summarize_draws(
-        draws, [*quantities.columns, "gap_magnitude_heating", "gap_magnitude_cooling"]
+    columns = [*quantities.columns, "gap_magnitude_heating", "gap_magnitude_cooling"]
+    summary = uncertainty.summarize_draws(draws, columns)
+    summary = composition_band(
+        summary, uncertainty.summarize_draws(wide, columns), columns
     )
+    summary = evaporative_sensitivity(summary, dwellings, quantities)
     summary.to_csv(TABLES / f"tract_gap_uncertainty_{STATE}.csv", index=False)
     whole = summary[summary["group"] == "all"]
     for name, (first_part, second_part) in config.DERIVED_QUANTITIES.items():

@@ -20,6 +20,7 @@ def _recs_file(tmp_path, replicate_shift=0.0):
         "FUELHEAT": [1, 5, 2, 1],
         "TOTALBTUSPH": [34121.4, 6824.28, 17060.7, 1.0],
         "KWHCOL": [1000.0, 200.0, 400.0, 1.0],
+        "ACEQUIPM_PUB": [1, 6, 3, 1],
     }
     frame = pd.DataFrame(rows)
     for i in range(1, 61):
@@ -240,3 +241,15 @@ def test_donor_level_energy_corrects_load_and_consumption_with_the_same_factor()
     assert row["heating_kwh_electricity"] == pytest.approx(0.75 * 120)
     assert row["heating_kwh_uncorrected"] == pytest.approx(0.25 * 30 + 0.75 * 60)
     assert row["heating_kbtu"] == pytest.approx(0.25 * 200 + 0.75 * 400)
+
+
+def test_recs_share_uses_the_weights_and_the_jackknife_formula(tmp_path):
+    recs = val.read_recs(_recs_file(tmp_path, replicate_shift=100.0), "UT")
+    share, se = val.recs_share(recs, "ACEQUIPM_PUB", 6)
+    assert share == pytest.approx(100.0 / 400.0)
+    rep1 = 100.0 / 500.0
+    assert se == pytest.approx(np.sqrt(59 / 60 * (rep1 - share) ** 2))
+    both, _ = val.recs_share(recs, "ACEQUIPM_PUB", (3, 6))
+    assert both == pytest.approx(300.0 / 400.0)
+    with pytest.raises(KeyError):
+        val.recs_share(recs, "NOT_A_COLUMN", 1)

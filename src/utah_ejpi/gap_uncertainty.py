@@ -81,6 +81,7 @@ from utah_ejpi.uncertainty import (
 
 __all__ = [
     "Shrinkage",
+    "add_composition_draws",
     "composite_weight",
     "composition_shift",
     "composition_shift_regression",
@@ -188,6 +189,76 @@ def composite_weight(
         if float(((e[idx] - a[idx]) ** 2).sum()) > 0.0:
             boot.append(weight(idx))
     return value, float(np.std(boot, ddof=1)) if len(boot) > 1 else 0.0
+
+
+def add_composition_draws(
+    draws: pd.DataFrame,
+    shift: pd.DataFrame,
+    derived: Mapping[str, tuple[str, str]] | None = None,
+    seed: int = 2026,
+) -> pd.DataFrame:
+    """Add the composition of the tract to the simulations as a separate source.
+
+    In every simulation each tract draws one standard normal number and adds that
+    number times its change by composition (:func:`composition_shift_regression`)
+    to its quantities, the same number for every quantity and group, as
+    :func:`simulate_tract_quantities` does with ``composition_shift``. Applying it
+    to simulations made without that source gives the wider band that includes it,
+    and the simulations without it remain the validated interval.
+
+    Parameters
+    ----------
+    draws : pandas.DataFrame
+        Output of :func:`simulate_tract_quantities` (with ``GEOID`` and ``draw``).
+    shift : pandas.DataFrame
+        Signed change by tract (index ``GEOID``) and quantity (columns).
+    derived : mapping of str to tuple of str, optional
+        Quantities that are the sum of two others, recomputed in the order given
+        after the shift.
+    seed : int
+        Seed of the random generator.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A copy of ``draws`` with the shifted and recomputed quantities.
+
+    Raises
+    ------
+    ValueError
+        If a quantity of ``shift`` or ``derived`` is not in the simulations.
+
+    Examples
+    --------
+    >>> d = pd.DataFrame({"GEOID": ["a"] * 4, "group": "all", "draw": range(4),
+    ...                   "q": 1.0})
+    >>> s = pd.DataFrame({"q": [2.0]}, index=pd.Index(["a"], name="GEOID"))
+    >>> out = add_composition_draws(d, s)
+    >>> bool(out["q"].std() > 0)
+    True
+    """
+    needed = {*shift.columns, *(derived or {})}
+    for parts in (derived or {}).values():
+        needed.update(parts)
+    if not needed <= set(draws.columns):
+        raise ValueError("The simulations do not have every quantity named.")
+    out = draws.copy()
+    rng = np.random.default_rng(seed)
+    tracts = np.sort(out["GEOID"].unique())
+    draw_ids = np.sort(out["draw"].unique())
+    u = pd.DataFrame(
+        rng.standard_normal((len(tracts), len(draw_ids))),
+        index=tracts,
+        columns=draw_ids,
+    ).stack()
+    key = pd.MultiIndex.from_arrays([out["GEOID"], out["draw"]])
+    factor = u.reindex(key).to_numpy()
+    for name in shift.columns:
+        delta = out["GEOID"].map(shift[name]).fillna(0.0).to_numpy()
+        out[name] = out[name] + delta * factor
+    for name, (first_part, second_part) in (derived or {}).items():
+        out[name] = out[first_part] + out[second_part]
+    return out
 
 
 def shrink_draws(

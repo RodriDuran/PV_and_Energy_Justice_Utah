@@ -601,3 +601,26 @@ def test_the_regression_shift_takes_the_type_out_and_checks_its_columns():
         gu.composition_shift_regression(
             base, q, ind, shares.assign(other=0.0), controls
         )
+
+
+def test_the_composition_band_adds_one_number_per_tract_and_simulation():
+    out = _run(n_draws=100, resample=False, seed=2)
+    shift = pd.DataFrame(
+        {"gap_cooling": [4.0, 0.0]}, index=pd.Index([T1, T2], name="GEOID")
+    )
+    derived = {"norm_cooling": ("cur_cooling", "gap_cooling")}
+    wide = gu.add_composition_draws(out, shift, derived, seed=1)
+    first = wide[(wide.GEOID == T1) & (wide.group == "all")]
+    second = wide[(wide.GEOID == T2) & (wide.group == "all")]
+    assert first["gap_cooling"].std() == pytest.approx(4.0, rel=0.2)
+    assert second["gap_cooling"].std() == pytest.approx(0.0, abs=1e-9)
+    assert np.allclose(wide["norm_cooling"], wide["cur_cooling"] + wide["gap_cooling"])
+    # the simulations of the validated interval do not change
+    assert np.allclose(out["cur_cooling"], wide["cur_cooling"])
+    # the same number is added to every group of a tract in a simulation
+    both = wide[wide.GEOID == T1].pivot(
+        index="draw", columns="group", values="gap_cooling"
+    ) - out[out.GEOID == T1].pivot(index="draw", columns="group", values="gap_cooling")
+    assert np.allclose(both["all"], both["Owner"])
+    with pytest.raises(ValueError, match="every quantity"):
+        gu.add_composition_draws(out, shift.rename(columns={"gap_cooling": "x"}))

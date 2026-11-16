@@ -49,6 +49,7 @@ __all__ = [
     "read_eia_residential_totals",
     "read_lead_tract_means",
     "read_recs",
+    "recs_share",
     "recs_means",
     "composition_classes",
     "air_conditioning_comparison",
@@ -384,8 +385,9 @@ def read_recs(path: str | os.PathLike, state: str) -> pd.DataFrame:
         The households of the state with their final weight ``NWEIGHT``, the 60
         replicate weights ``NWEIGHT1`` to ``NWEIGHT60``, and the columns used in
         the comparison: ``KOWNRENT``, ``TYPEHUQ``, ``FUELHEAT``, ``TOTALBTUSPH``
-        (space heating, all fuels, thousand Btu) and ``KWHCOL`` (electricity for
-        cooling, kWh).
+        (space heating, all fuels, thousand Btu), ``KWHCOL`` (electricity for
+        cooling, kWh) and ``ACEQUIPM_PUB`` (main air conditioning equipment; 6 is
+        an evaporative or swamp cooler).
 
     Notes
     -----
@@ -403,9 +405,59 @@ def read_recs(path: str | os.PathLike, state: str) -> pd.DataFrame:
         "FUELHEAT",
         "TOTALBTUSPH",
         "KWHCOL",
+        "ACEQUIPM_PUB",
     ]
     recs = pd.read_csv(path, usecols=columns)
     return recs[recs["state_postal"] == state].reset_index(drop=True)
+
+
+def recs_share(
+    recs: pd.DataFrame, column: str, values: int | tuple[int, ...]
+) -> tuple[float, float]:
+    """Share of the households of a RECS state with a value of a variable.
+
+    Parameters
+    ----------
+    recs : pandas.DataFrame
+        Output of :func:`read_recs`.
+    column : str
+        Variable of the file (for example ``"ACEQUIPM_PUB"``).
+    values : int or tuple of int
+        Codes that count.
+
+    Returns
+    -------
+    tuple of float
+        ``(share, standard_error)`` of the share of households, weighted with
+        ``NWEIGHT``; the error follows the jackknife formula of the RECS guide
+        with the 60 replicate weights, as in :func:`recs_means`.
+
+    Raises
+    ------
+    KeyError
+        If the variable is not in ``recs``.
+
+    Examples
+    --------
+    >>> recs = pd.DataFrame({"x": [6, 1], "NWEIGHT": [1.0, 3.0]})
+    >>> for i in range(1, 61):
+    ...     recs[f"NWEIGHT{i}"] = recs["NWEIGHT"]
+    >>> recs_share(recs, "x", 6)
+    (0.25, 0.0)
+
+    References
+    ----------
+    U.S. Energy Information Administration (2023), 2020 RECS microdata guide
+    (``eia_2023_recs2020``), section on the jackknife method.
+    """
+    flag = recs[column].isin(np.atleast_1d(values)).astype(float)
+    share = float((flag * recs["NWEIGHT"]).sum() / recs["NWEIGHT"].sum())
+    reps = [f"NWEIGHT{i}" for i in range(1, RECS_REPLICATES + 1)]
+    estimates = recs[reps].mul(flag, axis=0).sum() / recs[reps].sum()
+    se = np.sqrt(
+        (RECS_REPLICATES - 1) / RECS_REPLICATES * ((estimates - share) ** 2).sum()
+    )
+    return share, float(se)
 
 
 def _recs_labels(recs: pd.DataFrame) -> pd.DataFrame:
