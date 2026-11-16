@@ -101,7 +101,8 @@ files, NREL ResStock 2025 release 1 (weather year 2018), PRISM climate grids, th
 Residential Energy Consumption Survey 2020, EIA sales totals, LEAD tool (Department
 of Energy) and the American Time Use Survey. The catalog of every variable, its
 source, universe and verification state is in
-`src/utah_ejpi/data/variable_catalog.csv`. References are in `references.bib`.
+`src/utah_ejpi/data/variable_catalog.csv`. Each method cites its sources in the
+`References` section of its docstring.
 
 ## Conventions
 
@@ -111,6 +112,10 @@ source, universe and verification state is in
   above 40 %.
 - Race is not used as a term of any index.
 - Code, comments and docstrings in English, numpydoc style.
+
+## License
+
+GNU General Public License, version 3 or later. See `LICENSE`.
 
 ## Resumen en español
 

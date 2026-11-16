@@ -8,6 +8,8 @@ name = "utah-ejpi"
 version = "0.0.1"
 description = "Just energy transition for heating and cooling at census-tract level (Utah)."
 requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+classifiers = ["License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)"]
 dependencies = ["requests>=2.31", "pandas>=2.0", "pyarrow>=14"]
 
 [project.optional-dependencies]
