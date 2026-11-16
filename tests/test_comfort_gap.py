@@ -245,3 +245,43 @@ def test_tract_profiles_accept_a_series_that_differs_by_tract():
         cg.accumulate_tract_profiles(
             coef, None, ["x"], {"x": "coef"}, hours=3, tract_series=by_tract
         )
+
+
+def _diary():
+    """One respondent: asleep at the start, a nap in the afternoon, night sleep."""
+    return pd.DataFrame(
+        {
+            "TUCASEID": [1, 1, 1],
+            "TUSTARTTIM": ["04:00:00", "14:00:00", "22:30:00"],
+            "TUSTOPTIME": ["07:00:00", "14:30:00", "04:00:00"],
+            "TRCODEP": [10101, 10101, 10101],
+        }
+    )
+
+
+def test_the_published_rules_find_the_night_and_ignore_the_nap():
+    for rule in ("knutson_lauderdale", "basner_dinges"):
+        got = cg.sleep_times_published(_diary(), rule).iloc[0]
+        assert (got["wake_min"], got["bed_min"]) == (420, 1350)
+        assert cg.sleep_times(_diary()).iloc[0]["bed_min"] == 1350
+
+
+def test_the_rules_differ_in_what_they_count_as_sleep_and_as_a_period():
+    diary = _diary()
+    diary.loc[2, ["TUSTARTTIM", "TRCODEP"]] = ["22:30:00", 10102]
+    # sleeplessness is time in bed for one rule and not a sleep episode for the other
+    basner = cg.sleep_times_published(diary, "basner_dinges").iloc[0]
+    knutson = cg.sleep_times_published(diary, "knutson_lauderdale").iloc[0]
+    assert basner["bed_min"] == 1350
+    assert np.isnan(knutson["bed_min"])
+    # a period in bed shorter than two hours is not a night
+    short = diary.assign(TRCODEP=10101)
+    short.loc[2, ["TUSTARTTIM", "TUSTOPTIME"]] = ["23:00:00", "00:30:00"]
+    assert np.isnan(cg.sleep_times_published(short, "basner_dinges").iloc[0]["bed_min"])
+
+
+def test_the_published_rules_check_their_inputs():
+    with pytest.raises(ValueError, match="rule"):
+        cg.sleep_times_published(_diary(), "other")
+    with pytest.raises(ValueError, match="columns"):
+        cg.sleep_times_published(_diary().drop(columns="TRCODEP"))

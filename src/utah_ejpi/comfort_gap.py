@@ -54,6 +54,7 @@ __all__ = [
     "out_of_range",
     "required_masks",
     "sleep_times",
+    "sleep_times_published",
     "to_standard_time",
 ]
 
@@ -61,10 +62,13 @@ __all__ = [
 DEFAULT_FLOOR_C = 18.0
 #: Upper limit of the comfort band, in degrees Celsius (convention of the study).
 DEFAULT_CEILING_C = 26.0
-#: Code of the activity "sleeping" in the lexicon of the time use survey.
-#: NO VERIFICADO against the lexicon document; checked only through the
-#: plausibility of the resulting times (median wake time 07:00).
+#: Code of the activity "sleeping" in the lexicon of the time use survey: 01 Personal
+#: Care, 01 Sleeping, 01 Sleeping (010101; it includes naps and waking up). Checked
+#: in the 2024 lexicon of the Bureau of Labor Statistics (page 2), which lists next to
+#: it 010102 (sleeplessness) and 010199 (sleeping, not elsewhere classified).
 SLEEP_ACTIVITY_CODE = 10101
+#: Codes that make up the time in bed of the published rule of Basner and Dinges.
+TIME_IN_BED_CODES = (10101, 10102, 10199)
 
 _DAY_MINUTES = 1440
 
@@ -131,6 +135,14 @@ def sleep_times(
     ... })
     >>> sleep_times(acts).iloc[0].to_dict()
     {'TUCASEID': 1, 'wake_min': 420, 'bed_min': 1350}
+
+    References
+    ----------
+    Bureau of Labor Statistics (2025), activity lexicon of the American Time Use
+    Survey (``bls_2024_atus_lexicon``). The rule was compared with two published
+    ones, :func:`sleep_times_published`: Knutson and Lauderdale (2009,
+    ``knutson_2009_bed_wake_adolescents``) and Basner and Dinges (2009,
+    ``basner_2009_trading_sleep``).
     """
     needed = {"TUCASEID", "TUSTARTTIM", "TUSTOPTIME", "TRCODEP"}
     if not needed <= set(activities.columns):
@@ -176,6 +188,111 @@ def sleep_times(
             bed = s % _DAY_MINUTES
         rows.append((case, wake, bed))
     return pd.DataFrame(rows, columns=["TUCASEID", "wake_min", "bed_min"])
+
+
+def sleep_times_published(
+    activities: pd.DataFrame, rule: str = "basner_dinges"
+) -> pd.DataFrame:
+    """Wake-up and bed times of every respondent with a published rule.
+
+    Two definitions used in studies of the time use survey, to compare with the
+    rule of :func:`sleep_times`:
+
+    ``"knutson_lauderdale"``
+        The wake-up time is the end of the first sleep episode of the diary; the bed
+        time is the start of the last sleep episode that starts after 18:00 (an
+        episode that is already in progress when the diary starts does not give a
+        bed time). The episodes are those of the code of sleeping.
+    ``"basner_dinges"``
+        The time in bed is the sleeping, sleeplessness and sleeping not elsewhere
+        classified codes taken together. The bed time is the start of the first
+        period in bed that starts between 18:00 and 4:00 and lasts at least two
+        continuous hours; the wake-up time is the start of the first wake period
+        that starts after 4:00 and before 12:00 and lasts at least two continuous
+        hours.
+
+    Parameters
+    ----------
+    activities : pandas.DataFrame
+        Activity file with ``TUCASEID``, ``TUSTARTTIM``, ``TUSTOPTIME`` and
+        ``TRCODEP``.
+    rule : {"basner_dinges", "knutson_lauderdale"}
+        Definition.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per respondent with sleep records: ``TUCASEID``, ``wake_min`` and
+        ``bed_min`` (minutes since midnight; missing when not identified).
+
+    Raises
+    ------
+    ValueError
+        If the rule is unknown or a required column is missing.
+
+    Examples
+    --------
+    >>> acts = pd.DataFrame({
+    ...     "TUCASEID": [1, 1],
+    ...     "TUSTARTTIM": ["04:00:00", "22:30:00"],
+    ...     "TUSTOPTIME": ["07:00:00", "04:00:00"],
+    ...     "TRCODEP": [10101, 10101],
+    ... })
+    >>> sleep_times_published(acts).iloc[0].to_dict()
+    {'TUCASEID': 1, 'wake_min': 420, 'bed_min': 1350}
+
+    References
+    ----------
+    Knutson and Lauderdale (2009, ``knutson_2009_bed_wake_adolescents``);
+    Basner and Dinges (2009, ``basner_2009_trading_sleep``).
+    """
+    if rule not in ("basner_dinges", "knutson_lauderdale"):
+        raise ValueError("rule must be 'basner_dinges' or 'knutson_lauderdale'.")
+    needed = {"TUCASEID", "TUSTARTTIM", "TUSTOPTIME", "TRCODEP"}
+    if not needed <= set(activities.columns):
+        raise ValueError(f"activities needs the columns {sorted(needed)}.")
+    codes = TIME_IN_BED_CODES if rule == "basner_dinges" else (SLEEP_ACTIVITY_CODE,)
+    data = activities[activities["TRCODEP"].isin(codes)].copy()
+    # Minutes since the start of the diary (4:00); the last episode ends at 1440.
+    start = (_minutes(data["TUSTARTTIM"]) - 240) % _DAY_MINUTES
+    stop = (_minutes(data["TUSTOPTIME"]) - 240) % _DAY_MINUTES
+    data["start"] = start
+    data["stop"] = stop.where(stop > start, stop + _DAY_MINUTES)
+    data = data.sort_values(["TUCASEID", "start"])
+    rows = []
+    for case, block in data.groupby("TUCASEID", sort=False):
+        episodes = list(zip(block["start"], block["stop"], strict=True))
+        if rule == "knutson_lauderdale":
+            wake = episodes[0][1]
+            later = [s for s, _ in episodes if s >= 840]
+            bed = later[-1] if later else np.nan
+        else:
+            periods: list[list[int]] = []
+            for s, e in episodes:
+                if periods and s <= periods[-1][1]:
+                    periods[-1][1] = max(periods[-1][1], e)
+                else:
+                    periods.append([int(s), int(e)])
+            bed = next(
+                (s for s, e in periods if 840 <= s < _DAY_MINUTES and e - s >= 120),
+                np.nan,
+            )
+            awake, previous = [], 0
+            for s, e in periods:
+                if s > previous:
+                    awake.append((previous, s))
+                previous = e
+            if previous < _DAY_MINUTES:
+                awake.append((previous, _DAY_MINUTES))
+            wake = next((s for s, e in awake if 0 < s < 480 and e - s >= 120), np.nan)
+        rows.append(
+            {
+                "TUCASEID": case,
+                "wake_min": (wake + 240) % _DAY_MINUTES if wake == wake else np.nan,
+                "bed_min": (bed + 240) % _DAY_MINUTES if bed == bed else np.nan,
+            }
+        )
+    return pd.DataFrame(rows).astype({"TUCASEID": activities["TUCASEID"].dtype})
 
 
 def household_window_table(

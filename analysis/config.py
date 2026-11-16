@@ -246,4 +246,10 @@ EVAPORATIVE_SHARES = (0.0, 0.25, 0.5)
 # Utah, 4 shifts and 1 dwelling in 12: about 80 minutes with 14 processes.
 RUN_CLIMATE_SHIFT = False
 CLIMATE_SHIFTS = (-4.0, -2.0, 2.0, 4.0)
+# Larger drops of temperature, for the tracts that are much colder than the weather
+# station of their county (in Utah 8 of 716 are more than 4 degrees colder in annual
+# mean, by the heating degree days, and 2 more than 6; the largest is 6.4). They are
+# simulated for the same dwellings and saved apart, so the shifts above are not
+# repeated: 2 shifts, about 40 minutes with 14 processes.
+CLIMATE_SHIFTS_COLD = (-8.0, -6.0)
 CLIMATE_SHIFT_SAMPLE_EVERY = 12
