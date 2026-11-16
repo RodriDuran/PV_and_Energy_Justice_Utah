@@ -25,6 +25,7 @@ import requests
 
 __all__ = [
     "ACS_YEAR",
+    "acs_to_long",
     "download_ac_prevalence",
     "download_acs",
     "download_block_relationship",
@@ -165,6 +166,11 @@ def download_file(
     ------
     RuntimeError
         If every attempt fails (the source may be unavailable or have moved).
+
+    Examples
+    --------
+    >>> download_file("https://example.org/table.csv", "data/raw/table.csv")
+    ...     # doctest: +SKIP
     """
     dest = Path(dest)
     if dest.exists() and not overwrite:
@@ -223,6 +229,10 @@ def download_geography(
     -------
     list of pathlib.Path
         Local paths of the zip and text files.
+
+    Examples
+    --------
+    >>> download_geography("data/raw/geography", ["49"])  # doctest: +SKIP
     """
     dest = Path(dest)
     items = []
@@ -299,7 +309,33 @@ def _acs_clean(value: str | None) -> str:
 
 
 def acs_to_long(rows: list, table: str) -> list[tuple[str, str, str, str, str]]:
-    """Reshape an API response to (GEOID, NAME, variable, estimate, moe) rows."""
+    """Reshape an API response to (GEOID, NAME, variable, estimate, moe) rows.
+
+    Parameters
+    ----------
+    rows : list
+        Response of the Census API for tracts: the first row holds the names of the
+        columns (``NAME``, the estimates ``<table>_<n>E``, their margins
+        ``<table>_<n>M``, ``state``, ``county`` and ``tract``).
+    table : str
+        Table whose estimates are kept (for example ``"B25127"``).
+
+    Returns
+    -------
+    list of tuple
+        One row per tract and variable: ``(GEOID, NAME, variable, estimate,
+        moe)``; the API's large negative codes for missing values become empty
+        strings.
+
+    Examples
+    --------
+    >>> rows = [
+    ...     ["NAME", "B25127_002E", "B25127_002M", "state", "county", "tract"],
+    ...     ["Tract 1", "10", "3", "49", "035", "100100"],
+    ... ]
+    >>> acs_to_long(rows, "B25127")
+    [('49035100100', 'Tract 1', 'B25127_002', '10', '3')]
+    """
     head = rows[0]
     idx = {name: i for i, name in enumerate(head)}
     pattern = re.compile(rf"^{re.escape(table)}_\d+E$")
@@ -354,6 +390,10 @@ def download_acs(
     list of pathlib.Path
         Local CSV paths, named ``<table>_tract_<state>.csv`` (``us`` when
         several states are requested).
+
+    Examples
+    --------
+    >>> download_acs("data/raw/acs", ["B25127"], ["49"], year=2024)  # doctest: +SKIP
     """
     key = api_key or os.environ.get("CENSUS_API_KEY")
     dest = Path(dest)
@@ -406,6 +446,10 @@ def download_decennial(
     -------
     list of pathlib.Path
         Local CSV paths, named ``<table>_dhc2020_tract_<state>.csv``.
+
+    Examples
+    --------
+    >>> download_decennial("data/raw/census_2020", ["49"])  # doctest: +SKIP
     """
     key = api_key or os.environ.get("CENSUS_API_KEY")
     dest = Path(dest)
@@ -509,6 +553,11 @@ def download_decennial_blocks(
     RuntimeError
         If the Census API does not answer with status 200.
 
+
+    Examples
+    --------
+    >>> download_decennial_blocks("data/raw/census_2020", ["49"])  # doctest: +SKIP
+
     References
     ----------
     U.S. Census Bureau, 2020 Census Demographic and Housing Characteristics
@@ -588,6 +637,11 @@ def download_block_relationship(
     list of pathlib.Path
         Paths of the extracted text files (pipe separated).
 
+
+    Examples
+    --------
+    >>> download_block_relationship("data/raw/census_2020", ["49"])  # doctest: +SKIP
+
     References
     ----------
     U.S. Census Bureau, 2020 Census block relationship files,
@@ -645,6 +699,10 @@ def download_resstock(
     -------
     list of pathlib.Path
         Local paths.
+
+    Examples
+    --------
+    >>> download_resstock("data/raw/resstock", "UT")  # doctest: +SKIP
     """
     dest = Path(dest)
     st = state.upper()
@@ -724,6 +782,11 @@ def download_resstock_timeseries(
     -------
     list of pathlib.Path
         Local paths, named ``<bldg_id>-<upgrade>.parquet``.
+
+    Examples
+    --------
+    >>> download_resstock_timeseries("data/raw/resstock_ts", [100, 200], "UT")
+    ...     # doctest: +SKIP
     """
     dest = Path(dest)
     st = state.upper()
@@ -754,6 +817,10 @@ def download_recs(dest: str | os.PathLike, overwrite: bool = False) -> list[Path
     -------
     list of pathlib.Path
         Local paths.
+
+    Examples
+    --------
+    >>> download_recs("data/raw/recs_2020")  # doctest: +SKIP
     """
     dest = Path(dest)
     return _download_many(((u, dest / n) for n, u in RECS_FILES.items()), overwrite)
@@ -781,6 +848,10 @@ def download_eia930(
     -------
     list of pathlib.Path
         Local paths of the two files (about 75 MB together for the whole country).
+
+    Examples
+    --------
+    >>> download_eia930("data/raw/eia930_2018", year=2018)  # doctest: +SKIP
     """
     dest = Path(dest)
     items = (
@@ -818,6 +889,11 @@ def download_eia_state_totals(
     -------
     list of pathlib.Path
         Local paths of the three files (under 1 MB together).
+
+
+    Examples
+    --------
+    >>> download_eia_state_totals("data/raw/eia_state_totals", "UT")  # doctest: +SKIP
 
     References
     ----------
@@ -872,6 +948,10 @@ def download_prism(
     -------
     list of pathlib.Path
         Paths of the GeoTIFF rasters.
+
+    Examples
+    --------
+    >>> download_prism("data/raw/climate", year=2018)  # doctest: +SKIP
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -917,6 +997,10 @@ def download_lead(
     -------
     list of pathlib.Path
         Local paths (state zips, data dictionary, tract list, methodology).
+
+    Examples
+    --------
+    >>> download_lead("data/raw/lead_2022", ["49"])  # doctest: +SKIP
     """
     dest = Path(dest)
     items = [(f"{LEAD_BASE}/{n}", dest / n.replace("%20", "_")) for n in LEAD_GENERAL]
@@ -947,6 +1031,10 @@ def download_ac_prevalence(
     -------
     list of pathlib.Path
         Local paths.
+
+    Examples
+    --------
+    >>> download_ac_prevalence("data/raw/ac_prevalence")  # doctest: +SKIP
     """
     dest = Path(dest)
     items = [(u, dest / "lace_2023" / n) for n, u in LACE_FILES.items()]

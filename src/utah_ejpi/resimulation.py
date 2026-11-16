@@ -267,6 +267,11 @@ def fix_foundation_custom_blocks(idf_text: str) -> str:
     -------
     str
         The model without custom blocks; unchanged when it has none.
+
+    Examples
+    --------
+    >>> idf = open("run.idf", encoding="utf-8").read()  # doctest: +SKIP
+    >>> fix_foundation_custom_blocks(idf)  # doctest: +SKIP
     """
 
     def one(match: re.Match[str]) -> str:
@@ -317,6 +322,11 @@ def prepare_model(idf_text: str, fix_hydronic: bool = True) -> str:
     ------
     ValueError
         If the model is not for the expected version of EnergyPlus.
+
+    Examples
+    --------
+    >>> idf = open("run.idf", encoding="utf-8").read()  # doctest: +SKIP
+    >>> prepare_model(idf)  # doctest: +SKIP
     """
     check_energyplus_version(idf_text)
     text = fix_hydronic_flows(idf_text) if fix_hydronic else idf_text
@@ -358,6 +368,11 @@ def add_ideal_cooling(idf_text: str) -> str:
     AssertionError
         If the model does not have the structure that ResStock gives to the
         conditioned zone.
+
+    Examples
+    --------
+    >>> idf = open("run.idf", encoding="utf-8").read()  # doctest: +SKIP
+    >>> add_ideal_cooling(idf)  # doctest: +SKIP
     """
     connections = re.search(
         r"(ZoneHVAC:EquipmentConnections,\s*\n\s*conditioned space,[^\n]*\n\s*"
@@ -473,6 +488,11 @@ def normative_model(
     ------
     ValueError
         If the model has no thermostat of the expected structure.
+
+    Examples
+    --------
+    >>> idf = open("run.idf", encoding="utf-8").read()  # doctest: +SKIP
+    >>> normative_model(idf, "setpoints.csv")  # doctest: +SKIP
     """
     pattern = (
         r"(ThermostatSetpoint:DualSetpoint,\s*\n\s*conditioned space temperature "

@@ -453,6 +453,13 @@ def simulate_tract_quantities(
     The ratio of the climate line is the one of the energy of a dwelling, whose
     unit is energy per year; it is applied as a factor to any quantity chosen in
     ``climate_corrected``, also to a quantity that can be negative.
+
+    Examples
+    --------
+    >>> draws = simulate_tract_quantities(weights, donors, dwellings, quantities,
+    ...     uses,  # doctest: +SKIP
+    >>>                                   totals, tract_dd, station_dd, heating,
+    ...     cooling)  # doctest: +SKIP
     """
     if set(uses) != set(quantities.columns):
         raise ValueError("uses must have one entry for each column of quantities.")
@@ -746,6 +753,11 @@ def known_population_quantities(
     ValueError
         If the unit is not a column of the dwellings or the dwellings span more than
         one upgrade.
+
+    Examples
+    --------
+    >>> known_population_quantities(dwellings, quantities, uses, station_dd,
+    ...     unit="puma")  # doctest: +SKIP
     """
     if unit not in dwellings.columns:
         raise ValueError("unit must be a column of dwellings.")
@@ -922,6 +934,13 @@ def estimate_transfer_tau_quantities(
     ------
     ValueError
         If no unit has ``min_dwellings`` dwellings.
+
+    Examples
+    --------
+    >>> table = pd.DataFrame({"dwellings": [100, 100], "truth_a": [10.0, 10.0],
+    ...     "estimate_a": [11.0, 9.0], "lo_a": [10.0, 8.0], "hi_a": [12.0, 10.0]})
+    >>> round(estimate_transfer_tau_quantities(table, ["a"])["a"], 3)
+    0.079
     """
     big = table[table["dwellings"] >= min_dwellings]
     if big.empty:

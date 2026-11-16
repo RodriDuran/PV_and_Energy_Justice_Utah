@@ -106,6 +106,10 @@ def within_type_dispersion(dwellings: pd.DataFrame) -> Dispersion:
     Dispersion
         Pooled over the types with two or more dwellings with a system, weighting
         each type by its degrees of freedom.
+
+    Examples
+    --------
+    >>> within_type_dispersion(dwellings)  # doctest: +SKIP
     """
     stock = dwellings[dwellings["occupied"]].copy()
     stock["cell"] = (
@@ -227,6 +231,12 @@ def simulate_tract_energy(
     factor of each dwelling is lognormal with mean one; the factors of heating and
     cooling of a dwelling are correlated (``dispersion.correlation``) and a
     dwelling without a system keeps zero.
+
+    Examples
+    --------
+    >>> simulate_tract_energy(weights, donors, dwellings, tract_totals, tract_dd,
+    ...     # doctest: +SKIP
+    >>>                       station_dd, heating, cooling)  # doctest: +SKIP
     """
     if dwellings["upgrade"].nunique() != 1:
         raise ValueError("Pass the dwellings of one upgrade.")
@@ -454,6 +464,12 @@ def apply_level_factors(
     -------
     pandas.DataFrame
         A copy of the simulations with the energy columns scaled.
+
+    Examples
+    --------
+    >>> draws = pd.DataFrame({"heating_kbtu": [10.0, 20.0], "cooling_kbtu": [5.0, 5.0]})
+    >>> apply_level_factors(draws, 0.8, 1.1).round(2).values.tolist()
+    [[8.0, 5.5], [16.0, 5.5]]
     """
     out = draws.copy()
     for col in out.columns:
@@ -490,6 +506,15 @@ def aggregate_draws(
         One row per unit and simulation with ``GEOID`` (the unit), ``group``
         (``"all"``), ``draw``, ``dwellings`` (sum) and the averaged columns, so
         that :func:`summarize_draws` and :func:`rank_stability` apply to it.
+
+    Examples
+    --------
+    >>> draws = pd.DataFrame({"GEOID": ["a", "b"] * 2, "group": "all", "draw": [0,
+    ...     0, 1, 1], "dwellings": [1.0, 3.0, 1.0, 3.0], "x": [2.0, 4.0, 2.0, 4.0]})
+    >>> units = pd.Series({"a": "u", "b": "u"})
+    >>> out = aggregate_draws(draws, units, ["x"])
+    >>> out["x"].round(2).tolist()
+    [3.5, 3.5]
     """
     sub = draws[draws["group"] == "all"].copy()
     sub["unit"] = sub["GEOID"].map(units)
@@ -526,6 +551,14 @@ def summarize_draws(
         coefficient of variation in percent (``<column>_cv``) and its quality
         class (``<column>_quality``: high below 12 %, medium up to 40 %, low
         above), following the convention of the project for the survey.
+
+    Examples
+    --------
+    >>> draws = pd.DataFrame({"GEOID": ["a"] * 4, "group": "all", "draw": range(4),
+    ...     "x": [1.0, 2.0, 3.0, 4.0]})
+    >>> table = summarize_draws(draws, ["x"])
+    >>> table.columns.tolist()
+    ['GEOID', 'group', 'x', 'x_sd', 'x_lo', 'x_hi', 'x_cv', 'x_quality']
     """
     low, high = (1 - level) / 2, 1 - (1 - level) / 2
     grouped = draws.groupby(["GEOID", "group"])
@@ -582,6 +615,10 @@ def rank_stability(
         One row per tract with ``rank_mean``, ``rank_lo`` and ``rank_hi``
         (percentile rank), ``modal_class`` (class most often assigned, 1 is the
         lowest) and ``class_share`` (share of the simulations in that class).
+
+    Examples
+    --------
+    >>> rank_stability(draws, "heating_kbtu", n_classes=5)  # doctest: +SKIP
     """
     sub = draws[draws["group"] == group].dropna(subset=[column])
     rank = sub.groupby("draw")[column].rank(pct=True)
@@ -699,6 +736,10 @@ def known_population_test(
     ------
     ValueError
         If the unit is unknown or the dwellings span more than one upgrade.
+
+    Examples
+    --------
+    >>> known_population_test(dwellings, station_dd, unit="puma")  # doctest: +SKIP
     """
     if unit not in ("county", "puma"):
         raise ValueError("unit must be 'county' or 'puma'.")
@@ -863,6 +904,10 @@ def estimate_transfer_tau(
     ------
     ValueError
         If no unit has ``min_dwellings`` dwellings.
+
+    Examples
+    --------
+    >>> estimate_transfer_tau(known_population_table)  # doctest: +SKIP
     """
     big = table[table["dwellings"] >= min_dwellings]
     if big.empty:
@@ -895,6 +940,10 @@ def known_population_summary(table: pd.DataFrame) -> pd.DataFrame:
         of units whose truth is inside the interval) and ``half_width`` (median
         half-width of the interval relative to the estimate). The number of units
         is in ``units``.
+
+    Examples
+    --------
+    >>> known_population_summary(known_population_table)  # doctest: +SKIP
     """
     rows = []
     for use in ("heating", "cooling"):

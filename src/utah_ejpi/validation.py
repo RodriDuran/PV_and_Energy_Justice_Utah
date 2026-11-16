@@ -90,6 +90,12 @@ def composition_classes() -> pd.DataFrame:
         B25117, B25042 and B25009; the totals and subtotals are not included.
         Bedrooms "none" and "1" form one class because ResStock has no
         dwelling with no bedroom; household sizes of 7 or more form one class.
+
+    Examples
+    --------
+    >>> classes = composition_classes()
+    >>> classes.columns.tolist()
+    ['table', 'variable', 'tenure', 'class']
     """
     path = resources.files("utah_ejpi") / "data" / "composition_classes.csv"
     with resources.as_file(path) as file:
@@ -124,6 +130,10 @@ def resstock_class(dwellings: pd.DataFrame, table: str) -> pd.Series:
     the Bedrooms characteristic) states that more than 5 bedrooms are labeled 5 and
     0 bedrooms are labeled 1, so it is compared with the Census class "5 or more"
     (and the Census class "0 or 1" holds the 1).
+
+    Examples
+    --------
+    >>> resstock_class(dwellings, "bedrooms")  # doctest: +SKIP
     """
     if table == "heating_fuel":
         return dwellings["heating_fuel"].map(_FUEL_CLASS).fillna("other")
@@ -157,6 +167,12 @@ def observed_composition(
     pandas.DataFrame
         ``GEOID``, ``tenure``, ``class`` and ``observed`` (dwellings), adding the
         Census categories that form each class.
+
+    Examples
+    --------
+    >>> table = read_acs_table("B25117_tract_us.csv")  # from housing_stock
+    ...     # doctest: +SKIP
+    >>> observed_composition(table, "heating_fuel", "49")  # doctest: +SKIP
     """
     classes = composition_classes()
     classes = classes[classes["table"] == table]
@@ -195,6 +211,11 @@ def implied_composition(
         one of the Census type: tenure is part of the type, so donors always
         have the tenure of the type they represent, except when the nearest
         year-built class is used, which keeps tenure too.
+
+    Examples
+    --------
+    >>> implied_composition(weights, donors, dwellings, "heating_fuel")
+    ...     # doctest: +SKIP
     """
     attrs = dwellings[["building_id"]].assign(
         **{"class": resstock_class(dwellings, table)}
@@ -236,6 +257,10 @@ def composition_errors(
     -----
     A tract with no Census dwellings of a tenure contributes nothing for that
     tenure. The tracts of the Census table that lack donors are left out.
+
+    Examples
+    --------
+    >>> composition_errors(implied, observed)  # doctest: +SKIP
     """
     both = observed.merge(implied, on=["GEOID", "tenure", "class"], how="outer").fillna(
         {"observed": 0.0, "implied": 0.0}
@@ -301,6 +326,10 @@ def air_conditioning_comparison(
     not stated whether evaporative coolers count as air conditioning (NO
     VERIFICADO). ResStock does not model evaporative coolers, so dwellings that
     have one are modeled with no cooling or with another system.
+
+    Examples
+    --------
+    >>> air_conditioning_comparison(weights, donors, dwellings, lace)  # doctest: +SKIP
     """
     cooled = dwellings[["building_id"]].assign(
         cooled=(dwellings["cooling_type"] != "None").astype(float)
@@ -395,6 +424,10 @@ def read_recs(path: str | os.PathLike, state: str) -> pd.DataFrame:
     "calibrated" usage, estimated from bills and adjusted to totals. The cooling
     figure includes evaporative coolers, which ResStock does not model, and the
     heating figure includes main and secondary equipment.
+
+    Examples
+    --------
+    >>> read_recs("recs2020_public_v7.csv", "UT").head()  # doctest: +SKIP
     """
     columns = [
         "state_postal",
@@ -493,6 +526,11 @@ def recs_means(recs: pd.DataFrame, variable: str) -> pd.DataFrame:
         ``sqrt((R - 1) / R * sum((estimate_r - estimate) ** 2))`` over the ``R``
         = 60 replicate weights.
 
+
+    Examples
+    --------
+    >>> recs_means(recs, "heating_kwh")  # doctest: +SKIP
+
     References
     ----------
     U.S. Energy Information Administration (2023), 2020 RECS microdata guide
@@ -579,6 +617,11 @@ def compare_with_recs(
     -----
     The RECS interval covers only the sampling error of the survey, not the
     error of the model that produced its end uses.
+
+    Examples
+    --------
+    >>> compare_with_recs(recs, dwellings, donor_energy, "heating_kwh")
+    ...     # doctest: +SKIP
     """
     reference = recs_means(recs, variable)
     use = variable.split("_")[0]
@@ -664,6 +707,12 @@ def read_eia_residential_totals(
         If the year or the state is not in the files.
     ImportError
         If ``pypdf`` or ``openpyxl`` (optional dependencies) are not installed.
+
+
+    Examples
+    --------
+    >>> read_eia_residential_totals("data/raw/eia_state_totals_ut", "UT", 2018)
+    ...     # doctest: +SKIP
 
     References
     ----------
@@ -788,6 +837,11 @@ def read_lead_tract_means(zip_path: str | os.PathLike, member: str) -> pd.DataFr
     LEAD is a model of the spending reported to the Census survey, calibrated to
     sales of the utilities (Ma et al. 2024, ``doe_2024_lead_methodology``); the
     expenditure covers every use of the dwelling, not only heating and cooling.
+
+    Examples
+    --------
+    >>> read_lead_tract_means("UT-2022-LEAD-data.zip",
+    ...     "UT AMI Census Tracts 2022.csv")  # doctest: +SKIP
     """
     with zipfile.ZipFile(zip_path) as zf, zf.open(member) as fh:
         table = pd.read_csv(fh, dtype={"FIP": str})
@@ -829,6 +883,10 @@ def lead_convergence(tract_energy: pd.DataFrame, lead: pd.DataFrame) -> pd.DataF
     propane and fuel oil against other-fuel expenditure. The rank correlation
     says whether the tracts are ordered alike by two independent models; it says
     nothing about the level.
+
+    Examples
+    --------
+    >>> lead_convergence(tract_energy, lead)  # doctest: +SKIP
     """
     w = tract_energy["dwellings"]
     frame = pd.DataFrame({"GEOID": tract_energy["GEOID"], "w": w})

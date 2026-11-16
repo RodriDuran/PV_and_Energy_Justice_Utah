@@ -172,6 +172,10 @@ def fit_degree_day_sensitivity(
     from differences between counties, so it assumes that, once the controls are
     taken into account, the counties differ in the load of their dwellings only
     through climate.
+
+    Examples
+    --------
+    >>> fit_degree_day_sensitivity(dwellings, station_dd, "heating")  # doctest: +SKIP
     """
     load_col, dd_col = END_USES[end_use]
     stations = station_degree_days[station_degree_days["kind"] == "station"]
@@ -414,6 +418,10 @@ def leave_one_county_out(
     -----
     The expected load given the controls is computed with all the counties, so
     this is a check of the climate line and not of the whole procedure.
+
+    Examples
+    --------
+    >>> leave_one_county_out(dwellings, station_dd, "heating")  # doctest: +SKIP
     """
     load_col, dd_col = END_USES[end_use]
     stations = station_degree_days[station_degree_days["kind"] == "station"]
@@ -551,6 +559,11 @@ def donor_level_energy(
     ------
     ValueError
         If the dwellings table spans more than one upgrade.
+
+    Examples
+    --------
+    >>> donor_level_energy(weights, donors, dwellings, tract_dd, station_dd,
+    ...     heating, cooling)  # doctest: +SKIP
     """
     if dwellings["upgrade"].nunique() != 1:
         raise ValueError("Pass the dwellings of one upgrade.")
@@ -613,6 +626,12 @@ def build_tract_type_energy(
         range of the stations and, when the dwellings carry their annual
         consumption, ``heating_kwh``, ``cooling_kwh`` and the consumption by fuel
         (corrected and ``*_uncorrected``), all per dwelling.
+
+    Examples
+    --------
+    >>> build_tract_type_energy(weights, donors, dwellings, tract_dd, station_dd,
+    ...     # doctest: +SKIP
+    >>>                         heating, cooling)  # doctest: +SKIP
     """
     data = donor_level_energy(
         weights,
@@ -668,6 +687,10 @@ def tract_energy_summary(tract_type_energy: pd.DataFrame) -> pd.DataFrame:
         the energy per person and the share of dwellings whose correction
         extrapolated beyond the stations (``extrapolated_heating`` and
         ``extrapolated_cooling``). Tracts without dwellings are left out.
+
+    Examples
+    --------
+    >>> tract_energy_summary(tract_type_energy)  # doctest: +SKIP
     """
     d = tract_type_energy
     w = d["dwellings"]
@@ -737,6 +760,12 @@ def weighted_dwelling_energy(
     ------
     ValueError
         If the dwellings table spans more than one upgrade.
+
+    Examples
+    --------
+    >>> weighted_dwelling_energy(dwelling_weights, dwellings, tract_dd, station_dd,
+    ...     # doctest: +SKIP
+    >>>                          heating, cooling)  # doctest: +SKIP
     """
     if dwellings["upgrade"].nunique() != 1:
         raise ValueError("Pass the dwellings of one upgrade.")
@@ -775,6 +804,10 @@ def weighted_tract_means(frame: pd.DataFrame) -> pd.DataFrame:
         ``persons`` of the tract and the shares ``extrapolated_heating`` and
         ``extrapolated_cooling`` of the dwellings whose tract lies outside the
         range of the stations.
+
+    Examples
+    --------
+    >>> weighted_tract_means(weighted_dwelling_energy_frame)  # doctest: +SKIP
     """
     weight = frame["weight"]
     skip = {"GEOID", "building_id", "copy_2020", "weight", "county", "upgrade"}

@@ -196,6 +196,10 @@ def hourly_components(names: Sequence[str]) -> list[str]:
     ------
     KeyError
         If a temperature column is missing.
+
+    Examples
+    --------
+    >>> hourly_components(series_columns)  # doctest: +SKIP
     """
     energy = [n for n in names if _ENERGY.match(n)]
     loads = [n for n in names if n.startswith("out.load.") and n.endswith("..kbtu")]
@@ -250,6 +254,11 @@ def read_dwelling_hourly(
         If the file does not exist.
     ValueError
         If the series do not have 35,040 values in order, one every 15 minutes.
+
+    Examples
+    --------
+    >>> read_dwelling_hourly("100-0.parquet", components, clock_shift_hours=2)
+    ...     # doctest: +SKIP
     """
     path = Path(path)
     if not path.exists():
@@ -392,6 +401,10 @@ def temperature_response_shape(
     -------
     numpy.ndarray
         Load (kBtu per hour) with the shape of ``temperature``.
+
+    Examples
+    --------
+    >>> temperature_response_shape(response, outdoor_temperature)  # doctest: +SKIP
     """
     temperature = np.asarray(temperature, dtype=float)
     flat = np.atleast_2d(temperature)
@@ -604,6 +617,10 @@ def county_clock_shifts(
     ValueError
         If a weather file has no dry-bulb column or 8,760 rows, or a county's
         curves do not match.
+
+    Examples
+    --------
+    >>> county_clock_shifts(building_county, series_dir, weather_dir)  # doctest: +SKIP
     """
     series_dir, weather_dir = Path(series_dir), Path(weather_dir)
     county_of = pd.Series(dict(building_county))
@@ -659,6 +676,11 @@ def donor_coefficients(
         One row per tract and dwelling with ``GEOID``, ``building_id``, ``coef``
         (without climate factor; adds up to one in each tract),
         ``coef_heating`` and ``coef_cooling`` (with the factor of that use).
+
+    Examples
+    --------
+    >>> donor_coefficients(weights, donors, dwellings, tract_dd, station_dd,
+    ...     heating, cooling)  # doctest: +SKIP
     """
     needed = [
         "building_id",
@@ -771,6 +793,11 @@ def build_tract_profiles(
     ValueError
         If only some of the three arguments of the shape are given, a tract or
         station lacks daily temperatures, or a dwelling lacks a clock shift.
+
+    Examples
+    --------
+    >>> build_tract_profiles(coefficients, series_dir, out_dir, clock_shift_hours=2)
+    ...     # doctest: +SKIP
     """
     shaping = [
         tract_daily_temperature is not None,
@@ -913,6 +940,10 @@ def read_tract_profile(profile_dir: str | os.PathLike, geoid: str) -> pd.DataFra
     ------
     FileNotFoundError
         If the tract has no profile.
+
+    Examples
+    --------
+    >>> read_tract_profile("profiles", "49035100100")  # doctest: +SKIP
     """
     path = Path(profile_dir) / f"GEOID={geoid}" / "profile.parquet"
     if not path.exists():
@@ -964,6 +995,10 @@ def state_annual_means(
     ------
     FileNotFoundError
         If a tract has no profile.
+
+    Examples
+    --------
+    >>> state_annual_means(profile_dir, tract_dwellings)  # doctest: +SKIP
     """
     totals = dict.fromkeys(_MEAN_GROUPS, 0.0)
     for geoid, n in tract_dwellings.items():
@@ -996,6 +1031,11 @@ def read_profiles(
     -------
     pandas.DataFrame
         Long table with ``GEOID``, ``timestamp`` and the columns.
+
+    Examples
+    --------
+    >>> read_profiles("profiles", ["heating_kbtu"], geoids=["49035100100"])
+    ...     # doctest: +SKIP
     """
     folders = sorted(Path(profile_dir).glob("GEOID=*"))
     wanted = None if geoids is None else set(geoids)
@@ -1035,6 +1075,10 @@ def fuel_use_profiles(profile: pd.DataFrame) -> pd.DataFrame:
         (sum of the end uses of each fuel, without the photovoltaic generation)
         and ``electricity_net_kwh`` (total plus the generation of the dwellings
         that already have photovoltaic panels, which ResStock reports as negative).
+
+    Examples
+    --------
+    >>> fuel_use_profiles(profile)  # doctest: +SKIP
     """
     out = profile.copy()
     for name, sources in FUEL_COLUMNS.items():

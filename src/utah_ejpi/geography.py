@@ -52,6 +52,11 @@ def resstock_gisjoin_to_geoid(gisjoin: pd.Series) -> pd.Series:
     -------
     pandas.Series
         Eleven-character GEOID (state + county + tract).
+
+    Examples
+    --------
+    >>> resstock_gisjoin_to_geoid(pd.Series(["G0100010020100"])).tolist()
+    ['01001020100']
     """
     return gisjoin.str[1:3] + gisjoin.str[4:7] + gisjoin.str[8:14]
 
@@ -91,6 +96,11 @@ def build_tract_master(
         2010 tracts it overlaps, that lies in the assigned PUMA),
         ``n_resstock_pumas`` (PUMAs overlapped) and ``clean_puma_assignment``
         (the whole land area falls in one ResStock PUMA).
+
+    Examples
+    --------
+    >>> build_tract_master(dbf, tract_puma, relationship, resstock_lookup,
+    ...     state_fips)  # doctest: +SKIP
     """
     import geopandas  # optional dependency, imported when needed
 
@@ -170,6 +180,10 @@ def read_block_housing(path: str | os.PathLike) -> pd.DataFrame:
     pandas.DataFrame
         One row per 2020 block; ``GEOID_BLOCK`` is a 15-character string and the
         counts are integers (``H3_002N`` is the number of occupied housing units).
+
+    Examples
+    --------
+    >>> read_block_housing("blocks_housing_49.csv")  # doctest: +SKIP
     """
     return pd.read_csv(path, dtype={"GEOID_BLOCK": str})
 
@@ -190,6 +204,10 @@ def read_block_relationship(path: str | os.PathLike) -> pd.DataFrame:
         identifiers of both (``STATE_*``, ``COUNTY_*``, ``TRACT_*``, ``BLK_*``)
         as strings and the land area of the intersection ``AREALAND_INT`` in
         square meters as float.
+
+    Examples
+    --------
+    >>> read_block_relationship("tab2010_tab2020_st49.txt")  # doctest: +SKIP
     """
     rel = pd.read_csv(path, sep="|", dtype=str, encoding="utf-8-sig")
     rel["AREALAND_INT"] = rel["AREALAND_INT"].astype(float)
@@ -213,6 +231,11 @@ def read_resstock_tract_lookup(
     pandas.DataFrame
         One row per 2010 tract of the state with ``GEOID_TRACT_10`` (11
         characters), ``resstock_county`` and ``resstock_puma``.
+
+    Examples
+    --------
+    >>> read_resstock_tract_lookup("spatial_tract_lookup_table.csv", "49")
+    ...     # doctest: +SKIP
     """
     lookup = pd.read_csv(path, dtype=str)
     lookup = lookup[lookup["nhgis_2010_tract_gisjoin"].str[1:3] == state_fips]

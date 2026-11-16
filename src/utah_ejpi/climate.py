@@ -155,6 +155,11 @@ def prism_daily_at_points(
     ValueError
         If the files are not on the same grid, a point lies outside the grid or
         in a cell without data.
+
+    Examples
+    --------
+    >>> files = sorted(prism_dir.glob("*.tif"))  # doctest: +SKIP
+    >>> prism_daily_at_points(files, [-111.9], [40.8]).shape  # doctest: +SKIP
     """
     try:
         import tifffile  # optional dependency, imported when needed
@@ -216,6 +221,10 @@ def tract_points(tiger_path: str | os.PathLike) -> pd.DataFrame:
     -----
     Requires the optional package ``geopandas``. TIGER/Line files are on the
     NAD83 datum, the same as PRISM, so no transformation is needed.
+
+    Examples
+    --------
+    >>> tract_points("tl_2020_49_tract.dbf").head()  # doctest: +SKIP
     """
     import geopandas  # optional dependency, imported when needed
 
@@ -249,6 +258,12 @@ def build_degree_day_table(
     pandas.DataFrame
         Contract ``climate_degree_days``: ``id``, ``kind``, ``hdd``, ``cdd`` and
         the two base temperatures.
+
+    Examples
+    --------
+    >>> files = sorted(prism_dir.glob("*.tif"))  # doctest: +SKIP
+    >>> points = tract_points("tl_2020_49_tract.dbf")  # doctest: +SKIP
+    >>> build_degree_day_table(files, points, "tract", 18.0, 26.0)  # doctest: +SKIP
     """
     daily = prism_daily_at_points(files, points["lon"], points["lat"])
     hdd, cdd = degree_days(daily, heating_base_c, cooling_base_c)
@@ -288,6 +303,11 @@ def resstock_weather_degree_days(
     ------
     ValueError
         If the file has no dry-bulb temperature column or not 8760 rows.
+
+    Examples
+    --------
+    >>> resstock_weather_degree_days("G4900350.epw.parquet", 18.0, 26.0)
+    ...     # doctest: +SKIP
     """
     weather = pd.read_csv(path, encoding="latin-1")
     columns = [c for c in weather.columns if c.startswith("Dry Bulb Temperature")]
@@ -315,6 +335,10 @@ def compare_degree_days(prism: pd.DataFrame, weather_files: pd.DataFrame) -> dic
     dict
         For heating and for cooling: the correlation, the mean difference
         (PRISM minus file) and the largest absolute difference, in degree days.
+
+    Examples
+    --------
+    >>> compare_degree_days(prism_table, weather_table)  # doctest: +SKIP
     """
     merged = prism.merge(weather_files, on="id", suffixes=("_prism", "_file"))
     if len(merged) != len(prism):
@@ -350,6 +374,10 @@ def puma_degree_days(
         degree days of a PUMA are the average of those of the tracts that lie in
         it, weighted by the occupied dwellings of each tract in the PUMA, so that
         the climate of a PUMA is the one its households live in.
+
+    Examples
+    --------
+    >>> puma_degree_days(tract_degree_days, tract_puma_share)  # doctest: +SKIP
     """
     tracts = tract_degree_days[tract_degree_days["kind"] == "tract"]
     joined = tract_puma_share.merge(
@@ -402,6 +430,10 @@ def rank_pumas_by_climate(
     -----
     This is the third level of the fallback rule for types of dwelling that have
     no modeled dwelling in the PUMA or the county of a tract.
+
+    Examples
+    --------
+    >>> rank_pumas_by_climate(tract_degree_days, puma_table)  # doctest: +SKIP
     """
     tracts = tract_degree_days[tract_degree_days["kind"] == "tract"]
     pumas = puma_degree_days_table

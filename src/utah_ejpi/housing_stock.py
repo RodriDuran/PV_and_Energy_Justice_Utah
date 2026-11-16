@@ -77,6 +77,10 @@ def read_acs_table(path: str | os.PathLike) -> pd.DataFrame:
     -------
     pandas.DataFrame
         The table, with ``GEOID`` as a string.
+
+    Examples
+    --------
+    >>> read_acs_table("B25127_tract_us.csv").head()  # doctest: +SKIP
     """
     return pd.read_csv(path, dtype={"GEOID": str})
 
@@ -98,6 +102,12 @@ def b25127_cells() -> pd.DataFrame:
     (https://api.census.gov/data/2024/acs/acs5/groups/B25127.json): the 72
     variables whose label has four levels (total, tenure, year built, units).
     The subtotals are not included.
+
+    Examples
+    --------
+    >>> cells = b25127_cells()
+    >>> (len(cells), cells.columns.tolist())
+    (72, ['variable', 'tenure', 'vintage', 'building_type'])
     """
     path = resources.files("utah_ejpi") / "data" / "b25127_cells.csv"
     with resources.as_file(path) as file:
@@ -124,6 +134,11 @@ def acs_type_counts(table: pd.DataFrame, state_fips: str) -> pd.DataFrame:
     ------
     ValueError
         If a tract lacks some of the 72 cells or has a missing estimate.
+
+    Examples
+    --------
+    >>> table = read_acs_table("B25127_tract_us.csv")  # doctest: +SKIP
+    >>> acs_type_counts(table, "49").head()  # doctest: +SKIP
     """
     cells = b25127_cells()
     rows = table[table["GEOID"].str.startswith(state_fips)]
@@ -230,6 +245,13 @@ def build_type_donors(
     type is the plain mean of its donors. The share of the dwellings of a tract
     served by each level is available from :func:`fallback_shares` and is
     reported with the results.
+
+    Examples
+    --------
+    >>> weights, donors = build_type_donors(counts, dwellings, tract_puma_share,
+    ...     # doctest: +SKIP
+    >>>                                     tract_master, climate_rank)
+    ...     # doctest: +SKIP
     """
     stock = dwellings[dwellings["occupied"]]
     if stock["building_id"].duplicated().any():
@@ -389,6 +411,10 @@ def fallback_shares(weights: pd.DataFrame) -> pd.DataFrame:
         ``built_2020_or_later``, the share of dwellings built in 2020 or later,
         which are represented by older ones whatever the level. Tracts without
         dwellings are left out.
+
+    Examples
+    --------
+    >>> fallback_shares(weights)  # doctest: +SKIP
     """
     total = weights.groupby("GEOID")["weight"].sum()
     out = (
@@ -677,6 +703,13 @@ def reweight_tracts(
     as a stand-in for the class 2020 or later, which ResStock does not have; the
     two copies are fitted separately. Tracts with no dwellings in the Census table
     are left out.
+
+    Examples
+    --------
+    >>> weights, diagnostics = reweight_tracts(counts, composition, dwellings,
+    ...     # doctest: +SKIP
+    >>>                                        tract_puma_share, tract_master,
+    ...     climate_rank)  # doctest: +SKIP
     """
     sets = tuple(sets)
     if sets != REWEIGHT_SETS[: len(sets)] or not sets:

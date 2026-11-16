@@ -162,6 +162,10 @@ def read_resstock_annual(path: str | os.PathLike) -> pd.DataFrame:
     KeyError
         If the file lacks a column the package needs, which happens when the
         ResStock release has a different data dictionary.
+
+    Examples
+    --------
+    >>> read_resstock_annual("UT_upgrade0.parquet").head()  # doctest: +SKIP
     """
     columns = [*SOURCE_COLUMNS, *(c for cols in FUEL_COLUMNS.values() for c in cols)]
     try:
@@ -285,6 +289,11 @@ def build_resstock_dwellings(raw: pd.DataFrame) -> pd.DataFrame:
     ------
     ValueError
         If an occupied dwelling has a category without Census equivalent.
+
+    Examples
+    --------
+    >>> raw = read_resstock_annual("UT_upgrade0.parquet")  # doctest: +SKIP
+    >>> build_resstock_dwellings(raw).head()  # doctest: +SKIP
     """
     types = harmonize_resstock_types(raw)
     out = pd.DataFrame(index=raw.index)
