@@ -30,7 +30,8 @@ transfer error, the zone effect and the composition of the tract, and their summ
 ``data/results/tables``. The zone effect is the spread, between the ResStock zones,
 of the mean of a quantity once the type, fuel, bedrooms, size and occupants of the
 dwellings are taken out; the composition is the change of the mean of each tract when
-the Census counts of fuel, bedrooms and household size are used as well. The coverage
+the Census shares of fuel, bedrooms and household size are used as well, estimated by
+regression in every tract. The coverage
 of the 90 % interval in the test of section B is saved with and without those two
 sources (``known_population_coverage_gap_<state>.csv``). The share of the variance of
 each quantity that every source brings is saved in
@@ -71,7 +72,7 @@ import climate_fit
 import config
 from utah_ejpi import gap_uncertainty as gu
 from utah_ejpi import heat_pump as hp
-from utah_ejpi import housing_stock, uncertainty
+from utah_ejpi import housing_stock, uncertainty, validation
 from utah_ejpi.energy_requirement import fit_additive_slope
 
 STATE = config.STATE.lower()
@@ -287,17 +288,51 @@ def zone_effects(
     return sd
 
 
-def composition(quantities: pd.DataFrame, main_zone: pd.Series) -> pd.DataFrame:
+def composition(quantities: pd.DataFrame, dwellings: pd.DataFrame) -> pd.DataFrame:
     """Change of the mean of each tract with the Census composition (all dwellings).
 
-    The weights that also match the Census counts of fuel, bedrooms and household
-    size do not converge in every tract; those tracts take the median change of the
-    tracts of their zone that do (of the state if the zone has none).
+    It is estimated by regression on the Census shares of the heating fuel, the
+    bedrooms and the household size (``utah_ejpi.gap_uncertainty``), which exists in
+    every tract. Where the weights that match the Census tables converge, their
+    change is the control: the correlation and the error of the regression with
+    respect to it are saved in ``composition_regression_check_<state>.csv``.
     """
+    stock = dwellings[dwellings["occupied"]]
+    counts = housing_stock.acs_type_counts(
+        housing_stock.read_acs_table(
+            config.RAW / "acs" / "acs5_2024" / "B25127_tract_us.csv"
+        ),
+        config.STATE_FIPS,
+    )
+    observed = {
+        name: validation.observed_composition(
+            housing_stock.read_acs_table(
+                config.RAW
+                / "acs"
+                / "acs5_2024"
+                / f"{table}_tract_{STATE if scope == 'state' else scope}.csv"
+            ),
+            name,
+            config.STATE_FIPS,
+        )
+        for name, (table, scope) in config.COMPOSITION_TABLES.items()
+    }
+    shares = housing_stock.composition_shares(counts, observed)
+    indicators = housing_stock.class_indicators(stock)
+    controls = pd.get_dummies(
+        stock.set_index("building_id")[["tenure", "vintage", "building_type"]].astype(
+            str
+        )
+    ).astype(float)
     base = pd.read_csv(
         config.INTERIM / f"tract_dwelling_weights_type_{STATE}.csv",
         dtype={"GEOID": str},
     )
+    columns = energy_columns(quantities.columns)
+    shift = gu.composition_shift_regression(
+        base, quantities[columns], indicators, shares, controls
+    )
+
     variant = config.COMPOSITION_VARIANT
     alt = pd.read_csv(
         config.INTERIM / f"tract_dwelling_weights_{variant}_{STATE}.csv",
@@ -307,26 +342,35 @@ def composition(quantities: pd.DataFrame, main_zone: pd.Series) -> pd.DataFrame:
         config.INTERIM / f"reweighting_diagnostics_{variant}_{STATE}.csv",
         dtype={"GEOID": str},
     ).set_index("GEOID")
-    columns = energy_columns(quantities.columns)
-    shift = gu.composition_shift(base, alt, quantities[columns].dropna())
+    control = gu.composition_shift(base, alt, quantities[columns].dropna())
     ok = diag["converged"].reindex(shift.index).fillna(False).astype(bool)
-    zone = main_zone.reindex(shift.index)
-    by_zone = shift[ok].groupby(zone[ok]).median()
-    state = shift[ok].median()
-    filled = shift.copy()
-    for geoid in shift.index[~ok]:
-        z = zone.loc[geoid]
-        filled.loc[geoid] = by_zone.loc[z] if z in by_zone.index else state
-    out = filled.assign(converged=ok.to_numpy())
-    out.to_csv(TABLES / f"composition_shift_gap_{STATE}.csv")
-    logging.info(
-        "composition: %d of %d tracts converged; median absolute change of the "
-        "heating energy %.1f%% of the mean",
-        int(ok.sum()),
-        len(ok),
-        100 * filled["cur_heating"].abs().median() / quantities["cur_heating"].mean(),
+    rows = []
+    for name in columns:
+        truth = control.loc[ok[ok].index.intersection(control.index), name]
+        est = shift.loc[truth.index, name]
+        rows.append(
+            {
+                "quantity": name,
+                "tracts": len(truth),
+                "correlation": float(np.corrcoef(est, truth)[0, 1]),
+                "rmse": float(np.sqrt(((est - truth) ** 2).mean())),
+                "rmse_of_no_change": float(np.sqrt((truth**2).mean())),
+            }
+        )
+    pd.DataFrame(rows).to_csv(
+        TABLES / f"composition_regression_check_{STATE}.csv", index=False
     )
-    return filled
+    shift.assign(weights_converged=ok.reindex(shift.index).to_numpy()).to_csv(
+        TABLES / f"composition_shift_gap_{STATE}.csv"
+    )
+    logging.info(
+        "composition by regression in %d tracts; median absolute change of the "
+        "heating energy %.1f%% of the mean; the weights converge in %d",
+        len(shift),
+        100 * shift["cur_heating"].abs().median() / quantities["cur_heating"].mean(),
+        int(ok.sum()),
+    )
+    return shift
 
 
 SPLIT = tuple(f"{p}{u}" for p in config.SPLIT_PREFIXES for u in ("heating", "cooling"))
@@ -755,7 +799,7 @@ def simulate(table: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     ).to_csv(TABLES / f"own_slope_gap_{STATE}.csv", index=False)
     zone_sd = zone_effects(quantities, dwellings, degree_days, corrected + additive)
     logging.info("zone effect: %s", {k: round(v, 3) for k, v in zone_sd.items()})
-    shift = composition(quantities, main_puma)
+    shift = composition(quantities, dwellings)
     coverage = coverage_check(
         dwellings, quantities, uses, degree_days, corrected, tau, zone_sd,
         extra, extra_stations, additive, mix_weights,

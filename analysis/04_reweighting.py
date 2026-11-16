@@ -22,8 +22,6 @@ from utah_ejpi.utils import validate_table
 
 STATE_FIPS = config.STATE_FIPS
 STATE = config.STATE.lower()
-TABLES = {"heating_fuel": "B25117", "bedrooms": "B25042", "household_size": "B25009"}
-TABLE_SUFFIX = {"B25117": "us", "B25042": STATE, "B25009": STATE}
 VARIANTS = {
     "type": housing_stock.REWEIGHT_SETS[:1],
     "type_fuel": housing_stock.REWEIGHT_SETS[:2],
@@ -50,12 +48,15 @@ def _read_inputs():
     composition = {
         name: validation.observed_composition(
             housing_stock.read_acs_table(
-                raw / "acs" / "acs5_2024" / f"{table}_tract_{TABLE_SUFFIX[table]}.csv"
+                raw
+                / "acs"
+                / "acs5_2024"
+                / f"{table}_tract_{STATE if scope == 'state' else scope}.csv"
             ),
             name,
             STATE_FIPS,
         )
-        for name, table in TABLES.items()
+        for name, (table, scope) in config.COMPOSITION_TABLES.items()
     }
     shares = pd.read_csv(
         interim / f"tract_puma_share_{STATE}.csv", dtype={"GEOID": str}

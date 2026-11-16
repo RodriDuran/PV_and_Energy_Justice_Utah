@@ -83,6 +83,7 @@ __all__ = [
     "Shrinkage",
     "composite_weight",
     "composition_shift",
+    "composition_shift_regression",
     "shrink_draws",
     "estimate_transfer_tau_quantities",
     "known_population_quantities",
@@ -235,7 +236,7 @@ def shrink_draws(
     ...                       "q": [1.0, 3.0]})
     >>> out = shrink_draws(draws, {"q": Shrinkage(0.5, 0.0, 10.0)})
     >>> out["q"].tolist()
-    [6.0, 8.0]
+    [5.0, 7.0]
     """
     needed = {*shrink, *(derived or {})}
     for parts in (derived or {}).values():
@@ -865,6 +866,104 @@ def estimate_transfer_tau_quantities(
         ]
         tau[q] = float(np.sqrt(max((rel**2).mean() - (sd**2).mean(), 0.0)))
     return tau
+
+
+def composition_shift_regression(
+    weights_base: pd.DataFrame,
+    quantities: pd.DataFrame,
+    indicators: pd.DataFrame,
+    shares: pd.DataFrame,
+    controls: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Change of the mean of each tract with the Census composition, by regression.
+
+    The type of dwelling leaves out the heating fuel, the bedrooms and the size of
+    the household. Each quantity of the modeled dwellings is regressed on the type
+    and on the classes of those three variables; the change of the mean of a tract
+    is then the sum, over the classes, of the coefficient times the difference
+    between the share of the tract that the Census reports and the share that the
+    weights of the base method give. It needs only the margins of the Census, so
+    it exists in every tract, unlike the reweighting of the dwellings to the
+    tables, which has no solution when the modeled dwellings lack some combination
+    that the Census reports. The model is additive: it assumes no interaction
+    among the variables.
+
+    Parameters
+    ----------
+    weights_base : pandas.DataFrame
+        Weights of the base method (``GEOID``, ``building_id``, ``weight``).
+    quantities : pandas.DataFrame
+        Dwelling-level quantities indexed by ``building_id``; dwellings with a
+        missing value are left out of the regression.
+    indicators : pandas.DataFrame
+        Zero-one indicators of the classes of the dwellings
+        (:func:`utah_ejpi.housing_stock.class_indicators`), indexed by
+        ``building_id``.
+    shares : pandas.DataFrame
+        Share of each tract in every class
+        (:func:`utah_ejpi.housing_stock.composition_shares`), indexed by ``GEOID``;
+        its columns are those of ``indicators``.
+    controls : pandas.DataFrame, optional
+        Indicators of the type of the dwellings (tenure, period and building
+        type), indexed by ``building_id``, used only to take the type out of the
+        coefficients.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Index ``GEOID``, one column per quantity: the signed change of the mean per
+        dwelling. The tracts that have weights and shares.
+
+    Raises
+    ------
+    ValueError
+        If the shares have columns that the indicators do not have.
+
+    Examples
+    --------
+    >>> idx = pd.Index([1, 2, 3, 4], name="building_id")
+    >>> q = pd.DataFrame({"x": [10.0, 10.0, 30.0, 30.0]}, index=idx)
+    >>> ind = pd.DataFrame({"a": [1.0, 1.0, 0.0, 0.0]}, index=idx)
+    >>> ind["b"] = 1.0 - ind["a"]
+    >>> base = pd.DataFrame({"GEOID": "t", "building_id": [1, 2, 3, 4], "weight": 1.0})
+    >>> shares = pd.DataFrame({"a": [0.25], "b": [0.75]}, index=["t"])
+    >>> shift = composition_shift_regression(base, q, ind, shares)
+    >>> round(float(shift.loc["t", "x"]), 6)
+    5.0
+
+    References
+    ----------
+    Elbers et al. (2002, ``elbers_2002_micro_level_welfare``): census means of the
+    variables outside the model capture part of the location effect; the form is a
+    synthetic estimator by regression (Rao and Molina 2015,
+    ``rao_molina_2015_sae``).
+    """
+    if not set(shares.columns) <= set(indicators.columns):
+        raise ValueError("The shares have classes that the indicators do not have.")
+    y = quantities.dropna()
+    parts = [indicators.reindex(y.index)]
+    if controls is not None:
+        parts.insert(0, controls.reindex(y.index))
+    x = pd.concat(parts, axis=1).fillna(0.0)
+    design = np.column_stack([np.ones(len(x)), x.to_numpy(float)])
+    coefficient, *_ = np.linalg.lstsq(design, y.to_numpy(float), rcond=None)
+    beta = pd.DataFrame(coefficient[1:], index=x.columns, columns=y.columns).reindex(
+        shares.columns
+    )
+    columns = list(shares.columns)
+    base = weights_base.merge(
+        indicators[columns].reset_index(), on="building_id", how="inner"
+    )
+    weighted = base[columns].mul(base["weight"], axis=0)
+    weighted["GEOID"] = base["GEOID"]
+    base_share = (
+        weighted.groupby("GEOID")
+        .sum()
+        .div(base.groupby("GEOID")["weight"].sum(), axis=0)
+    )
+    common = base_share.index.intersection(shares.index)
+    difference = shares.loc[common, columns] - base_share.loc[common, columns]
+    return difference.fillna(0.0) @ beta.fillna(0.0)
 
 
 def composition_shift(

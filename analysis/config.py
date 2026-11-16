@@ -104,10 +104,20 @@ MIN_DONORS = 1
 # Uncertainty of the energy of each tract: number of simulations and the seed of
 # the random generator (the same seed gives the same simulations).
 N_DRAWS = 200
-# Weights of the dwellings that also match the Census counts of the fuel, the bedrooms
-# and the household size (script 04_reweighting.py); the change of the mean of each
-# tract against the weights of the type alone is the composition error of script
-# 07_gap_by_tract.py. Valid for any state with the same Census tables.
+# Census tables that give, by tenure, the heating fuel, the bedrooms and the household
+# size of the dwellings of every tract, with the scope of the file that holds each
+# one ("us": the table of the whole country; "state": the table of the state of the
+# run). They are used by scripts 04_reweighting.py and 07_gap_by_tract.py.
+COMPOSITION_TABLES = {
+    "heating_fuel": ("B25117", "us"),
+    "bedrooms": ("B25042", "state"),
+    "household_size": ("B25009", "state"),
+}
+# Weights of the dwellings that also match the Census counts of the heating fuel, the
+# bedrooms and the household size (script 04_reweighting.py). The composition error of
+# script 07_gap_by_tract.py is the change of the mean of each tract with the Census
+# shares of those variables, estimated by regression for every tract; these weights are
+# kept as a control where they exist. Valid for any state with the same Census tables.
 COMPOSITION_VARIANT = "type_fuel_bedrooms_size"
 # Quantities (gaps between the normative and the current energy) for which a slope of
 # their own against the degree days is tried as the climate correction of the tract

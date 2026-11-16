@@ -556,3 +556,48 @@ def test_known_population_accepts_any_unit_and_shrinks_toward_the_mean_of_the_re
     assert len(table) == 6
     assert np.allclose(table["estimate_gap_cooling"], table["state_gap_cooling"])
     assert not np.allclose(table["estimate_cur_cooling"], table["state_cur_cooling"])
+
+
+def _regression_inputs():
+    idx = pd.Index(range(1, 9), name="building_id")
+    gas = np.array([1, 1, 1, 1, 0, 0, 0, 0], dtype=float)
+    size = np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=float)
+    q = pd.DataFrame({"x": 100.0 - 40.0 * (1 - gas) + 5.0 * size}, index=idx)
+    ind = pd.DataFrame(
+        {"fuel:gas": gas, "fuel:elec": 1 - gas, "size:2": 1 - size, "size:3": size},
+        index=idx,
+    )
+    base = pd.DataFrame({"GEOID": "t", "building_id": list(idx), "weight": 1.0})
+    return q, ind, base
+
+
+def test_the_regression_shift_is_the_effect_times_the_change_of_the_shares():
+    q, ind, base = _regression_inputs()
+    # the base weights give 50 % gas and 50 % size 3; the Census says 20 % gas
+    shares = pd.DataFrame(
+        {"fuel:gas": [0.2], "fuel:elec": [0.8], "size:2": [0.5], "size:3": [0.5]},
+        index=pd.Index(["t"], name="GEOID"),
+    )
+    shift = gu.composition_shift_regression(base, q, ind, shares)
+    assert shift.loc["t", "x"] == pytest.approx(-0.3 * 40.0)
+    same = shares.assign(**{"fuel:gas": 0.5, "fuel:elec": 0.5})
+    assert gu.composition_shift_regression(base, q, ind, same).loc["t", "x"] == (
+        pytest.approx(0.0, abs=1e-9)
+    )
+
+
+def test_the_regression_shift_takes_the_type_out_and_checks_its_columns():
+    q, ind, base = _regression_inputs()
+    # a type that varies independently of the fuel and adds 10 to the quantity
+    owner = np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=float)
+    q = q.assign(x=q["x"] + 10.0 * owner)
+    controls = pd.DataFrame({"owner": owner, "renter": 1 - owner}, index=q.index)
+    shares = pd.DataFrame(
+        {"fuel:gas": [0.2], "fuel:elec": [0.8]}, index=pd.Index(["t"], name="GEOID")
+    )
+    shift = gu.composition_shift_regression(base, q, ind, shares, controls)
+    assert shift.loc["t", "x"] == pytest.approx(-0.3 * 40.0)
+    with pytest.raises(ValueError, match="classes"):
+        gu.composition_shift_regression(
+            base, q, ind, shares.assign(other=0.0), controls
+        )

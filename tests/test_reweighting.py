@@ -285,3 +285,62 @@ def test_energy_of_reweighted_dwellings_uses_the_weights_and_the_climate_factor(
     assert means["cooling_kbtu"] == pytest.approx(30 * 10 / 40)
     assert means["persons"] == pytest.approx(80.0)
     assert means["extrapolated_heating"] == 0.0
+
+
+def test_a_type_without_dwellings_does_not_make_the_tables_contradict_each_other():
+    missing = ("Owner", "1960 to 1979", "1")
+    counts, comp, shares, master, rank = _tables(
+        {OWNER_1: 100.0, missing: 20.0, RENTER_APT: 50.0},
+        {
+            ("Owner", "utility_gas"): 70.0,
+            ("Owner", "electricity"): 50.0,
+            ("Renter", "utility_gas"): 50.0,
+        },
+    )
+    w, diag = hs.reweight_tracts(
+        counts,
+        comp,
+        _stock(),
+        shares,
+        master,
+        rank,
+        sets=("type", "heating_fuel"),
+        min_weight_share=0.0,
+    )
+    row = diag.iloc[0]
+    assert row.infeasible_categories >= 1
+    # the 20 owners of the type that no modeled dwelling has cannot be represented,
+    # so the fuel table is scaled to the 100 owners that can
+    assert bool(row.converged)
+    owners = w[w.building_id.isin([1, 2, 4])].weight.sum()
+    assert owners == pytest.approx(100.0, rel=0.01)
+    assert w[w.building_id == 2].weight.iloc[0] == pytest.approx(
+        100.0 * 50 / 120, rel=0.02
+    )
+
+
+def test_composition_shares_scale_each_table_to_the_tenure_totals_of_the_types():
+    counts, comp, _, _, _ = _tables(
+        {OWNER_1: 100.0, RENTER_APT: 50.0},
+        {
+            ("Owner", "utility_gas"): 120.0,
+            ("Owner", "electricity"): 80.0,
+            ("Renter", "utility_gas"): 25.0,
+        },
+    )
+    shares = hs.composition_shares(counts, comp, ("heating_fuel",))
+    row = shares.loc[T]
+    assert row["heating_fuel:Owner|utility_gas"] == pytest.approx(60.0 / 150.0)
+    assert row["heating_fuel:Owner|electricity"] == pytest.approx(40.0 / 150.0)
+    assert row["heating_fuel:Renter|utility_gas"] == pytest.approx(50.0 / 150.0)
+    assert row.sum() == pytest.approx(1.0)
+    empty = counts.assign(estimate=0.0)
+    assert hs.composition_shares(empty, comp, ("heating_fuel",)).empty
+
+
+def test_class_indicators_give_each_dwelling_one_class_per_table():
+    ind = hs.class_indicators(_stock(), ("heating_fuel", "bedrooms"))
+    assert ind.index.tolist() == [1, 2, 3, 4]
+    assert (ind.sum(axis=1) == 2).all()
+    assert ind.loc[2, "heating_fuel:Owner|electricity"] == 1.0
+    assert ind.loc[3, "bedrooms:Renter|2"] == 1.0

@@ -41,6 +41,8 @@ __all__ = [
     "acs_type_counts",
     "b25127_cells",
     "build_type_donors",
+    "class_indicators",
+    "composition_shares",
     "fallback_shares",
     "read_acs_table",
     "reweight_tracts",
@@ -419,6 +421,113 @@ REWEIGHT_SETS = ("type", "heating_fuel", "bedrooms", "household_size")
 TIER_WEIGHTS = (1.0, 0.1, 0.01, 0.001)
 
 
+def class_indicators(
+    dwellings: pd.DataFrame, sets: Sequence[str] = REWEIGHT_SETS[1:]
+) -> pd.DataFrame:
+    """Return the indicator of the class of every modeled dwelling in each table.
+
+    Parameters
+    ----------
+    dwellings : pandas.DataFrame
+        Contract ``resstock_dwellings`` with the columns ``tenure``,
+        ``heating_fuel``, ``bedrooms`` and ``occupants`` (occupied dwellings are
+        used).
+    sets : sequence of str
+        Tables, a subset of ``"heating_fuel"``, ``"bedrooms"`` and
+        ``"household_size"``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Index ``building_id`` and one column of zeros and ones per class, named
+        ``"table:tenure|class"`` (the same names as in
+        :func:`composition_shares`). A class that no dwelling belongs to has no
+        column.
+
+    Examples
+    --------
+    >>> d = pd.DataFrame({"building_id": [1], "occupied": [True], "tenure": ["Owner"],
+    ...                   "heating_fuel": ["Natural Gas"], "bedrooms": [3],
+    ...                   "occupants": [2.0]})
+    >>> class_indicators(d, ("bedrooms",)).columns.tolist()
+    ['bedrooms:Owner|3']
+    """
+    stock = dwellings[dwellings["occupied"]].reset_index(drop=True)
+    parts = []
+    for name in sets:
+        label = name + ":" + stock["tenure"] + "|" + resstock_class(stock, name)
+        part = pd.get_dummies(label).astype(float)
+        part.index = stock["building_id"]
+        parts.append(part)
+    return pd.concat(parts, axis=1)
+
+
+def composition_shares(
+    counts: pd.DataFrame,
+    composition: dict[str, pd.DataFrame],
+    sets: Sequence[str] = REWEIGHT_SETS[1:],
+) -> pd.DataFrame:
+    """Share of the dwellings of each tract in every class of the Census tables.
+
+    Within each tenure the counts of a table are scaled to the total of that tenure
+    in the table of types (the Census tables do not add to the same total), and
+    every count is divided by the total of dwellings of the tract.
+
+    Parameters
+    ----------
+    counts : pandas.DataFrame
+        Contract ``acs_type_counts``.
+    composition : dict of pandas.DataFrame
+        For each table of ``sets``, the output of
+        :func:`utah_ejpi.validation.observed_composition`.
+    sets : sequence of str
+        Tables to use.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Index ``GEOID`` and one column per class named ``"table:tenure|class"``
+        with the share of the dwellings of the tract. The classes of a tenure that
+        a table does not report for a tract are zero. Tracts without dwellings in
+        the table of types are left out.
+
+    Examples
+    --------
+    >>> c = pd.DataFrame({"GEOID": ["a", "a"], "tenure": ["Owner", "Owner"],
+    ...                   "vintage": ["1939 or earlier", "1940 to 1959"],
+    ...                   "building_type": ["1", "1"], "estimate": [30.0, 70.0]})
+    >>> obs = pd.DataFrame({"GEOID": ["a", "a"], "tenure": ["Owner", "Owner"],
+    ...                     "class": ["utility_gas", "electricity"],
+    ...                     "observed": [40.0, 10.0]})
+    >>> shares = composition_shares(c, {"heating_fuel": obs}, ("heating_fuel",))
+    >>> shares.round(2).to_dict("records")
+    [{'heating_fuel:Owner|electricity': 0.2, 'heating_fuel:Owner|utility_gas': 0.8}]
+    """
+    tenure_total = counts.groupby(["GEOID", "tenure"])["estimate"].sum().unstack()
+    total = tenure_total.sum(axis=1)
+    pieces = []
+    for name in sets:
+        table = composition[name].copy()
+        table["column"] = name + ":" + table["tenure"] + "|" + table["class"]
+        have = table.groupby(["GEOID", "tenure"])["observed"].transform("sum")
+        want = [
+            tenure_total.at[g, t] if g in tenure_total.index else 0.0
+            for g, t in zip(table["GEOID"], table["tenure"], strict=True)
+        ]
+        scaled = np.where(
+            have > 0, table["observed"] * want / have.where(have > 0, 1), 0.0
+        )
+        denom = table["GEOID"].map(total)
+        table["share"] = scaled / denom
+        pieces.append(
+            table.pivot_table(
+                index="GEOID", columns="column", values="share", aggfunc="sum"
+            )
+        )
+    out = pd.concat(pieces, axis=1).fillna(0.0)
+    return out[out.index.isin(total[total > 0].index)]
+
+
 def _rake(
     weights: np.ndarray,
     categories: list[np.ndarray],
@@ -512,9 +621,11 @@ def reweight_tracts(
         For each of ``"heating_fuel"``, ``"bedrooms"`` and ``"household_size"``
         used in ``sets``, the output of
         :func:`utah_ejpi.validation.observed_composition` (``GEOID``,
-        ``tenure``, ``class``, ``observed``). Within each tenure, the counts are
-        scaled to the total of that tenure in ``counts``, since the Census tables
-        do not add to the same total.
+        ``tenure``, ``class``, ``observed``). Within each tenure, the counts of the
+        categories that some modeled dwelling can match are scaled to the total of
+        that tenure that the types of ``counts`` with a modeled dwelling can reach,
+        since the Census tables do not add to the same total and the dwellings of a
+        type without any modeled dwelling cannot be represented.
     dwellings : pandas.DataFrame
         Contract ``resstock_dwellings`` of one upgrade, with the columns
         ``heating_fuel``, ``bedrooms`` and ``occupants``.
@@ -633,6 +744,13 @@ def reweight_tracts(
     wanted = list(tracts) if tracts is not None else sorted(shares)
     weight_parts, diagnostics = [], []
     tenure_of_type = np.array([v.split("|")[0] for v in type_vocab])
+    # A category can be matched only if some modeled dwelling of the state belongs
+    # to it; the seed gives every dwelling of the state a positive weight, so this
+    # does not depend on the tract.
+    can_match = [
+        np.bincount(c, minlength=len(vocabs[name])) > 0
+        for c, name in zip(categories, sets, strict=True)
+    ]
     for geoid in wanted:
         if geoid not in type_counts.index or geoid not in shares:
             continue
@@ -647,7 +765,16 @@ def reweight_tracts(
         if total <= 0:
             continue
         targets = [type_target]
-        for name in sets[1:]:
+        asked = [type_target]
+        # The dwellings of a type that no modeled dwelling has cannot be
+        # represented, so the tables that follow are scaled to what the table of
+        # types can reach in each tenure; otherwise they would ask for a total that
+        # the types cannot give and the fitting would not converge.
+        reachable = {
+            tenure: type_target[(tenure_of_type == tenure) & can_match[0]].sum()
+            for tenure in ("Owner", "Renter")
+        }
+        for k, name in enumerate(sets[1:], start=1):
             vocab = vocabs[name]
             observed = (
                 comp[name].loc[geoid].reindex(vocab).fillna(0.0).to_numpy()
@@ -655,17 +782,20 @@ def reweight_tracts(
                 else np.zeros(len(vocab))
             )
             target = observed.astype(float)
+            requested = target.copy()
             for tenure in ("Owner", "Renter"):
                 in_tenure = np.array([v.startswith(tenure + "|") for v in vocab])
-                want = type_target[tenure_of_type == tenure].sum()
-                have = target[in_tenure].sum()
+                want = reachable[tenure]
+                have = target[in_tenure & can_match[k]].sum()
                 # The tables of the Census do not add up to the same total, so each
-                # tenure is scaled to the total of the table of types.
-                if have > 0:
+                # tenure is scaled to the total that the table of types can reach.
+                if have > 0 and want > 0:
                     target[in_tenure] *= want / have
+                    requested[in_tenure] *= want / have
                 else:
                     target[in_tenure] = np.nan
             targets.append(target)
+            asked.append(requested)
 
         own = shares[geoid]
         in_own = np.isin(puma_codes, list(own))
@@ -681,10 +811,12 @@ def reweight_tracts(
         w, iterations, converged, error, infeasible, worst = _rake(
             initial, categories, targets, tolerance, max_iterations
         )
-        n_bad = int(sum(b.sum() for b in infeasible))
+        # Categories that the Census asks for and that no modeled dwelling can fill.
+        unmatched = [(t > 0) & ~m for t, m in zip(asked, can_match, strict=True)]
+        n_bad = int(sum(b.sum() for b in unmatched))
         bad_share = max(
-            (float(t[b].sum() / np.nansum(t)) if np.nansum(t) > 0 else 0.0)
-            for t, b in zip(targets, infeasible, strict=True)
+            (float(t[b].sum() / t.sum()) if t.sum() > 0 else 0.0)
+            for t, b in zip(asked, unmatched, strict=True)
         )
         mass = w.sum()
         keep = w >= min_weight_share * mass

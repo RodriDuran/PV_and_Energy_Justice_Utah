@@ -25,7 +25,8 @@ where = ["src"]
 utah_ejpi = ["data/*.csv"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "src"]
+addopts = "--doctest-modules"
 
 [tool.ruff]
 line-length = 88
