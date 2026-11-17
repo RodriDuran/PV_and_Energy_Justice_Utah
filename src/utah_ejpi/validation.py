@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import re
 import zipfile
+from collections.abc import Sequence
 from importlib import resources
 from pathlib import Path
 
@@ -45,10 +46,15 @@ __all__ = [
     "GROUP_TYPES",
     "compare_with_recs",
     "lead_convergence",
+    "base_load_heating_factor",
     "measured_level_factors",
+    "read_eia_gas_customers",
+    "read_eia_monthly_residential",
     "read_eia_residential_totals",
     "read_lead_tract_means",
     "read_recs",
+    "recs_end_use_means",
+    "resstock_end_use_means",
     "recs_share",
     "recs_means",
     "composition_classes",
@@ -742,6 +748,337 @@ def read_eia_residential_totals(
         "natural_gas_kwh": gas_tbtu * 1e9 * _KWH_PER_KBTU,
         "electricity_mwh": mwh,
         "electricity_kwh": mwh * 1000.0,
+    }
+
+
+def read_eia_monthly_residential(
+    directory: str | os.PathLike, state: str, year: int
+) -> pd.DataFrame:
+    """Read the residential natural gas and electricity sold in a state by month.
+
+    Uses the monthly files of :func:`utah_ejpi.download.download_eia_monthly`. The
+    natural gas of the monthly series is in million cubic feet; it is taken to kWh
+    with the heat content that the annual table of the State Energy Data System
+    implies for the same year (annual energy over annual volume), so the twelve
+    months add up to the annual total of :func:`read_eia_residential_totals`. It
+    assumes that the heat content does not change within the year. The gas is the
+    volume delivered to customers in each billing month, which runs about two weeks
+    behind the calendar month.
+
+    Parameters
+    ----------
+    directory : path-like
+        Folder with ``n3010<st>2m.htm``, ``sales_revenue.xlsx``, ``use_res_<ST>.pdf``
+        and ``sales_annual.xlsx``.
+    state : str
+        Two-letter postal code.
+    year : int
+        Calendar year; both monthly series must have its twelve months.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Twelve rows (``month`` 1 to 12) with ``natural_gas_mmcf``,
+        ``natural_gas_kwh``, ``electricity_mwh``, ``electricity_kwh``,
+        ``electricity_customers`` and ``kwh_per_mmcf``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a file is missing.
+    ValueError
+        If the year or the state is not complete in the files.
+    ImportError
+        If ``pypdf`` or ``openpyxl`` (optional dependencies) are not installed.
+
+
+    Examples
+    --------
+    >>> read_eia_monthly_residential("data/raw/eia_state_totals_ut", "UT", 2018)
+    ...     # doctest: +SKIP
+
+    References
+    ----------
+    eia_ng_residential_consumption_monthly, eia_861m_monthly_sales,
+    eia_2025_seds_consumption.
+    """
+    directory = Path(directory)
+    code = state.upper()
+    page, workbook = (
+        directory / f"n3010{code.lower()}2m.htm",
+        (directory / "sales_revenue.xlsx"),
+    )
+    for path in (page, workbook):
+        if not path.exists():
+            raise FileNotFoundError(f"EIA file not found: {path}")
+    text = re.sub(
+        r"<[^>]+>|&nbsp;", " ", page.read_text(encoding="utf-8", errors="replace")
+    )
+    found = re.search(rf"(?<!\d){year}((?:\s+[\d,]+){{12}})", text)
+    if found is None:
+        raise ValueError(f"No complete year {year} in {page.name}.")
+    mmcf = np.array([float(v.replace(",", "")) for v in found.group(1).split()])
+    sales = pd.read_excel(
+        workbook, sheet_name="Monthly-States", header=None, skiprows=3
+    )
+    sales = sales.iloc[:, :7]
+    sales.columns = ["year", "month", "state", "status", "revenue", "mwh", "customers"]
+    rows = sales[(sales["state"] == code) & (sales["year"] == year)].sort_values(
+        "month"
+    )
+    if len(rows) != 12:
+        raise ValueError(f"No complete year {year} of {code} in {workbook.name}.")
+    annual = read_eia_residential_totals(directory, code, year)["natural_gas_kwh"]
+    per_mmcf = annual / float(mmcf.sum())
+    return pd.DataFrame(
+        {
+            "month": np.arange(1, 13),
+            "natural_gas_mmcf": mmcf,
+            "natural_gas_kwh": mmcf * per_mmcf,
+            "electricity_mwh": rows["mwh"].to_numpy(dtype=float),
+            "electricity_kwh": rows["mwh"].to_numpy(dtype=float) * 1000.0,
+            "electricity_customers": rows["customers"].to_numpy(dtype=float),
+            "kwh_per_mmcf": per_mmcf,
+        }
+    )
+
+
+def recs_end_use_means(
+    path: str | os.PathLike, state: str, groups: dict[str, Sequence[str]]
+) -> pd.DataFrame:
+    """Mean annual energy of groups of RECS end uses per household of a state.
+
+    Parameters
+    ----------
+    path : path-like
+        ``recs2020_public_v7.csv`` of the U.S. Energy Information Administration.
+    state : str
+        Two-letter postal code of the state.
+    groups : dict
+        Name of each group -> columns of the file that are added up (annual use in
+        thousand Btu, for example ``("BTUNGWTH",)`` for natural gas water heating).
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per group with ``mean_kwh`` (per household of the state, those
+        that do not use the fuel count as zero), ``se_kwh`` (jackknife error with
+        the 60 replicate weights, as in :func:`recs_means`), ``share_with_use``
+        (share of households with a positive value) and ``n_with_use`` (households
+        of the sample with a positive value).
+
+    Raises
+    ------
+    KeyError
+        If a column is not in the file.
+
+    Notes
+    -----
+    The end uses of the RECS are not metered: the codebook calls them "calibrated"
+    usage, estimated from bills and adjusted to totals. In the file, the column
+    ``BTUNGOTH`` is the sum of the end uses other than space and water heating, so
+    it must not be added to its own parts.
+
+    Examples
+    --------
+    >>> recs_end_use_means(
+    ...     "recs2020_public_v7.csv", "UT", {"water": ("BTUNGWTH",)}
+    ... )  # doctest: +SKIP
+
+    References
+    ----------
+    U.S. Energy Information Administration (2023), 2020 RECS microdata guide
+    (``eia_2023_recs2020``), section on the jackknife method.
+    """
+    needed = sorted({c for cols in groups.values() for c in cols})
+    replicates = [f"NWEIGHT{i}" for i in range(1, RECS_REPLICATES + 1)]
+    frame = pd.read_csv(path, usecols=["state_postal", "NWEIGHT", *replicates, *needed])
+    frame = frame[frame["state_postal"] == state.upper()]
+    rows = []
+    for name, cols in groups.items():
+        value = frame[list(cols)].sum(axis=1) * _KWH_PER_KBTU
+        mean = float((value * frame["NWEIGHT"]).sum() / frame["NWEIGHT"].sum())
+        reps = frame[replicates].mul(value, axis=0).sum() / frame[replicates].sum()
+        se = float(
+            np.sqrt(
+                (RECS_REPLICATES - 1) / RECS_REPLICATES * ((reps - mean) ** 2).sum()
+            )
+        )
+        rows.append(
+            {
+                "use": name,
+                "mean_kwh": mean,
+                "se_kwh": se,
+                "share_with_use": float(
+                    (frame["NWEIGHT"] * (value > 0)).sum() / frame["NWEIGHT"].sum()
+                ),
+                "n_with_use": int((value > 0).sum()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def read_eia_gas_customers(
+    directory: str | os.PathLike, state: str, year: int
+) -> float:
+    """Read the residential natural gas customers of a state in a year.
+
+    Parameters
+    ----------
+    directory : path-like
+        Folder with ``na1501_s<st>_8a.htm`` (see
+        :func:`utah_ejpi.download.download_eia_monthly`).
+    state : str
+        Two-letter postal code.
+    year : int
+        Calendar year, 1990 or later (the table lists the 1980s from 1987).
+
+    Returns
+    -------
+    float
+        Number of residential natural gas consumers (meters served) in the year.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file is missing.
+    ValueError
+        If the year is not in the table.
+
+    Examples
+    --------
+    >>> read_eia_gas_customers("data/raw/eia_state_totals_ut", "UT", 2018)
+    ...     # doctest: +SKIP
+
+    References
+    ----------
+    eia_ng_residential_consumers.
+    """
+    path = Path(directory) / f"na1501_s{state.lower()}_8a.htm"
+    if not path.exists():
+        raise FileNotFoundError(f"EIA file not found: {path}")
+    text = re.sub(
+        r"<[^>]+>|&nbsp;", " ", path.read_text(encoding="utf-8", errors="replace")
+    )
+    decade = year // 10 * 10
+    found = re.search(rf"{decade}'s((?:\s+[\d,]+)+)", text)
+    values = [] if found is None else found.group(1).split()
+    if year < 1990 or len(values) <= year - decade:
+        raise ValueError(f"No customers of {state.upper()} in {year} in {path.name}.")
+    return float(values[year - decade].replace(",", ""))
+
+
+def resstock_end_use_means(
+    path: str | os.PathLike, groups: dict[str, Sequence[str]]
+) -> tuple[pd.Series, float]:
+    """Mean annual energy per occupied dwelling of groups of ResStock end uses.
+
+    Parameters
+    ----------
+    path : path-like
+        Annual results of a state (``<ST>_upgrade0.parquet`` of the ResStock
+        release, one row per modeled dwelling).
+    groups : dict
+        Name of each group -> columns of the file (kWh per year, for example
+        ``"out.natural_gas.hot_water.energy_consumption..kwh"``) that are added up.
+
+    Returns
+    -------
+    tuple
+        ``(means, households)``: kWh per occupied dwelling and year of each group
+        (dwellings that do not use the fuel count as zero), weighted with the
+        sample weight of each modeled dwelling, and the number of occupied
+        dwellings that the weights represent.
+
+    Raises
+    ------
+    KeyError
+        If a column is not in the file.
+
+    Examples
+    --------
+    >>> resstock_end_use_means(
+    ...     "UT_upgrade0.parquet",
+    ...     {"water": ("out.natural_gas.hot_water.energy_consumption..kwh",)},
+    ... )  # doctest: +SKIP
+    """
+    needed = sorted({c for cols in groups.values() for c in cols})
+    frame = pd.read_parquet(path, columns=["weight", "in.vacancy_status", *needed])
+    frame = frame[frame["in.vacancy_status"] == "Occupied"]
+    weight = frame["weight"]
+    means = {
+        name: float((frame[list(cols)].sum(axis=1) * weight).sum() / weight.sum())
+        for name, cols in groups.items()
+    }
+    return pd.Series(means), float(weight.sum())
+
+
+def base_load_heating_factor(
+    measured: Sequence[float],
+    modeled_heating: Sequence[float],
+    modeled_other: Sequence[float],
+    summer_months: Sequence[int] = (6, 7, 8),
+) -> dict[str, float]:
+    """Level of the gas heating implied by the gas that is used without heating.
+
+    In the months without heating the gas sold is the gas of the other uses (water
+    heating, cooking, drying, pool and spa heaters). The factor that takes the
+    modeled other uses to the gas sold in those months is applied to the whole year
+    (the seasonal shape of those uses is the modeled one), and the heating is what
+    the annual total leaves. It has two numbers fitted (the factor of the other uses
+    on the summer months and the factor of the heating on the year) and uses the
+    modeled shape of the other uses, so it is a bound of the heating level and not a
+    calibration of the model: the months not used in the fit are the test.
+
+    Parameters
+    ----------
+    measured, modeled_heating, modeled_other : sequence of float
+        Twelve monthly values (January to December) in the same unit: the gas sold
+        in the state, the modeled gas for heating and the rest of the modeled gas.
+    summer_months : sequence of int
+        Months (1 to 12) in which the heating is taken as the small modeled value.
+
+    Returns
+    -------
+    dict
+        ``other_uses_factor`` (factor of the modeled other uses),
+        ``heating_factor`` (factor of the modeled heating) and
+        ``out_of_sample_error`` (relative error of the modeled total, after both
+        factors, in the months that were not used for ``other_uses_factor``).
+
+    Raises
+    ------
+    ValueError
+        If a series does not have twelve values or if the heating factor is not
+        positive.
+
+    Examples
+    --------
+    >>> heating = [10.0, 8, 5, 2, 0, 0, 0, 0, 0, 2, 5, 10]
+    >>> other = [1.0] * 12
+    >>> measured = [h + 2 * o for h, o in zip(heating, other)]
+    >>> out = base_load_heating_factor(measured, heating, other)
+    >>> round(out["other_uses_factor"], 3), round(out["heating_factor"], 3)
+    (2.0, 1.0)
+    """
+    measured, heat, other = (
+        np.asarray(x, dtype=float) for x in (measured, modeled_heating, modeled_other)
+    )
+    if not (len(measured) == len(heat) == len(other) == 12):
+        raise ValueError("Each series needs the twelve months.")
+    idx = np.array(summer_months) - 1
+    other_factor = (measured[idx].sum() - heat[idx].sum()) / other[idx].sum()
+    heating_factor = (measured.sum() - other_factor * other.sum()) / heat.sum()
+    if heating_factor <= 0:
+        raise ValueError("The gas of the other uses leaves no gas for heating.")
+    rest = np.setdiff1d(np.arange(12), idx)
+    predicted = heating_factor * heat + other_factor * other
+    return {
+        "other_uses_factor": float(other_factor),
+        "heating_factor": float(heating_factor),
+        "out_of_sample_error": float(
+            predicted[rest].sum() / measured[rest].sum() - 1.0
+        ),
     }
 
 

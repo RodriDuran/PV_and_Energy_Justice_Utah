@@ -32,6 +32,7 @@ __all__ = [
     "download_decennial",
     "download_decennial_blocks",
     "download_eia930",
+    "download_eia_monthly",
     "download_eia_state_totals",
     "download_file",
     "download_geography",
@@ -914,6 +915,62 @@ def download_eia_state_totals(
         (
             f"{EIA_STATE_BASE}/electricity/data/state/sales_annual.xlsx",
             dest / "sales_annual.xlsx",
+        ),
+    )
+    return _download_many(items, overwrite)
+
+
+def download_eia_monthly(
+    dest: str | os.PathLike, state: str, overwrite: bool = False
+) -> list[Path]:
+    """Download the measured residential consumption of a state by month.
+
+    Three official files of the U.S. Energy Information Administration: the monthly
+    residential natural gas consumption of the state (million cubic feet, as
+    delivered to customers), the monthly electricity sales by state and sector
+    (survey form EIA-861M) and the annual number of residential natural gas
+    customers. They are totals sold by the utilities for the whole state, so they
+    check the seasonal pattern of the modeled energy, not its split by use or
+    tract.
+
+    Parameters
+    ----------
+    dest : path-like
+        Directory for the files.
+    state : str
+        Two-letter postal code of the state.
+    overwrite : bool
+        Download again even if the file exists.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Local paths of the three files (about 2.3 MB together).
+
+
+    Examples
+    --------
+    >>> download_eia_monthly("data/raw/eia_state_totals", "UT")  # doctest: +SKIP
+
+    References
+    ----------
+    eia_ng_residential_consumption_monthly, eia_861m_monthly_sales,
+    eia_ng_residential_consumers.
+    """
+    dest = Path(dest)
+    code = state.upper()
+    items = (
+        (
+            f"{EIA_STATE_BASE}/dnav/ng/hist/n3010{code.lower()}2m.htm",
+            dest / f"n3010{code.lower()}2m.htm",
+        ),
+        (
+            f"{EIA_STATE_BASE}/electricity/data/eia861m/xls/sales_revenue.xlsx",
+            dest / "sales_revenue.xlsx",
+        ),
+        (
+            f"{EIA_STATE_BASE}/dnav/ng/hist/na1501_s{code.lower()}_8a.htm",
+            dest / f"na1501_s{code.lower()}_8a.htm",
         ),
     )
     return _download_many(items, overwrite)

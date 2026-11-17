@@ -74,3 +74,22 @@ def test_eia930_downloads_the_two_halves_of_the_year(monkeypatch, tmp_path):
         "EIA930_BALANCE_2018_Jul_Dec.csv",
     ]
     assert seen[0][0].endswith("sixMonthFiles/EIA930_BALANCE_2018_Jan_Jun.csv")
+
+
+def test_eia_monthly_download_the_three_files_of_the_state(monkeypatch, tmp_path):
+    seen = []
+
+    def fake(url, path, overwrite=False):
+        seen.append(url)
+        return path
+
+    monkeypatch.setattr(dl, "download_file", fake)
+    paths = dl.download_eia_monthly(tmp_path, "ut")
+    assert [p.name for p in paths] == [
+        "n3010ut2m.htm",
+        "sales_revenue.xlsx",
+        "na1501_sut_8a.htm",
+    ]
+    assert seen[0].endswith("/dnav/ng/hist/n3010ut2m.htm")
+    assert seen[1].endswith("/electricity/data/eia861m/xls/sales_revenue.xlsx")
+    assert seen[2].endswith("/dnav/ng/hist/na1501_sut_8a.htm")

@@ -3,7 +3,9 @@
 Run from the project root: ``python analysis/09_gap_profiles.py``. It needs the
 simulations of ``06_resimulation.py`` and the tables of ``07_gap_by_tract.py`` (the
 efficiency curves of the heat pump and the decision about the climate correction of
-each quantity).
+each quantity). It also writes the monthly table of each tract
+(``tract_monthly_energy_<state>.csv``); with ``--monthly-only`` it builds only that
+table from the profiles already written.
 
 For every tract it writes ``data/processed/gap_profiles_<state>/GEOID=<id>/
 profile.parquet`` with 8,760 hourly rows in local standard time and, per dwelling of
@@ -285,12 +287,77 @@ def check(annual: pd.DataFrame) -> None:
         )
 
 
+MONTHLY_QUANTITIES = {
+    "cur_heating": "heating_current_kbtu",
+    "cur_cooling": "cooling_current_kbtu",
+    "gap_heating": "heating_gap_kbtu",
+    "gap_cooling": "cooling_gap_kbtu",
+    "norm_heating": "heating_normative_kbtu",
+    "norm_cooling": "cooling_normative_kbtu",
+}
+
+
+def monthly() -> pd.DataFrame:
+    """Energy of today, normative energy and gap of every tract by calendar month.
+
+    The hours of each month of the profile give the seasonal shape; the level is
+    the annual value of the tract of ``07_gap_by_tract.py`` (the one mixed with the
+    mean of the state in the gap), so the twelve months add up to the annual value
+    that is reported. The same factor takes the annual limits of the 90 % interval
+    to the months, which means that the interval keeps the relative width of the
+    year in every month and does not include the uncertainty of how the year is
+    split between months (that error is measured against the monthly totals of the
+    state in section G of ``13_validation.py``). The normative energy is the energy
+    of today plus the gap, month by month, as in the annual table. Units: kBtu per
+    dwelling and month.
+    """
+    summary = pd.read_csv(
+        TABLES / f"tract_gap_uncertainty_{STATE}.csv", dtype={"GEOID": str}
+    )
+    annual = summary[summary["group"] == "all"].set_index("GEOID")
+    columns = list(MONTHLY_QUANTITIES.values())
+    rows = []
+    for geoid in annual.index:
+        profile = hourly.read_tract_profile(OUT, geoid)
+        months = hourly.monthly_sums(profile, columns)
+        total = months.sum()
+        for quantity, column in MONTHLY_QUANTITIES.items():
+            share = months[column] / total[column]
+            for suffix in ("", "_lo", "_hi"):
+                rows.append(
+                    pd.DataFrame(
+                        {
+                            "GEOID": geoid,
+                            "month": months.index,
+                            "quantity": quantity + suffix,
+                            "kbtu": share.to_numpy()
+                            * float(annual.loc[geoid, quantity + suffix]),
+                        }
+                    )
+                )
+    long = pd.concat(rows, ignore_index=True)
+    table = long.pivot_table(
+        index=["GEOID", "month"], columns="quantity", values="kbtu"
+    ).reset_index()
+    for use in ("heating", "cooling"):
+        table[f"norm_{use}"] = table[f"cur_{use}"] + table[f"gap_{use}"]
+    table.to_csv(TABLES / f"tract_monthly_energy_{STATE}.csv", index=False)
+    logging.info("monthly table: %d rows", len(table))
+    return table
+
+
 def run() -> None:
     """Build the profiles and compare their totals with the simulations."""
     annual = build()
     check(annual)
+    monthly()
 
 
 if __name__ == "__main__":
+    import sys
+
     logging.basicConfig(level=logging.INFO)
-    run()
+    if "--monthly-only" in sys.argv:
+        monthly()
+    else:
+        run()

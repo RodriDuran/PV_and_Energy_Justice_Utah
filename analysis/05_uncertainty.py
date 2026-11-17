@@ -7,12 +7,13 @@ The simulations of the energy of every tract (``config.N_DRAWS``) are drawn for 
 two rules of extrapolation of the climate (linear and capped); they are saved in
 ``data/interim/``. The summaries by tract (mean, interval, coefficient of variation and
 quality class) and the stability of the position of the tracts are saved in
-``data/results/tables/`` for three levels of the energy: ResStock's own, a low
-reference implied by the national survey of Utah households (RECS) and a high
-reference implied by the residential gas and electricity sold in the state
-(``config.MEASURED_YEAR``). It needs the hourly profiles of the tracts (to take the
-modeled consumption of all the uses) and the files of
-``download_eia_state_totals``.
+``data/results/tables/`` for three levels of the energy: ResStock's own (the high
+reference), the heating level that the gas sold in the months without heating leaves
+(``config.MEASURED_YEAR``) and a low reference implied by the national survey of Utah
+households (RECS). It needs the hourly profiles of the tracts (to take the modeled
+consumption of all the uses) and the files of ``download_eia_state_totals`` and
+``download_eia_monthly``. With ``--levels-only`` it applies the levels again to the
+simulations already saved, without simulating.
 
 The simulations include the transfer error of the dwellings borrowed from other PUMAs
 (a PUMA is a Census statistical area of at least 100,000 people). Its deviation is
@@ -56,40 +57,83 @@ def _tract_totals() -> pd.DataFrame:
 
 
 def _level_factors() -> dict[str, tuple[float, float]]:
-    """Factors of the level of the energy: ResStock, RECS and the measured totals.
+    """Factors of the level of the energy: ResStock, the gas base load and RECS.
 
-    ``recs_implied`` takes ResStock to the means of RECS (low reference);
-    ``eia_implied`` takes it to the residential gas and electricity sold in the
-    state in ``config.MEASURED_YEAR`` (high reference), assuming that all the
-    difference is in the heating with gas and in the electric cooling.
+    ``resstock`` is the energy as ResStock models it (the high reference);
+    ``base_load_implied`` takes the gas heating to the level that the gas sold in
+    the months without heating leaves (``validation.base_load_heating_factor``;
+    there is no equivalent for cooling, so its factor is 1); ``recs_implied`` takes
+    ResStock to the means of RECS (low reference). The factor that would assign the
+    whole difference with the totals sold to the heating and to the cooling is
+    written to ``level_factors_<state>.csv`` as ``rejected_eia_implied``: the
+    monthly pattern does not support it (section H of ``13_validation.py``).
     """
     table = pd.read_csv(
         config.ROOT / "data" / "results" / "tables" / f"recs_comparison_{STATE}.csv"
     )
     row = table[table["group_type"] == "all"].set_index("variable")
+    directory = config.RAW / f"eia_state_totals_{STATE}"
     measured = validation.read_eia_residential_totals(
-        config.RAW / f"eia_state_totals_{STATE}", config.STATE, config.MEASURED_YEAR
+        directory, config.STATE, config.MEASURED_YEAR
     )
     summary = pd.read_csv(
         config.INTERIM / f"tract_energy_summary_linear_{STATE}.csv",
         dtype={"GEOID": str},
     ).set_index("GEOID")["dwellings"]
-    modeled = hourly.state_annual_means(
-        config.ROOT / "data" / "processed" / f"hourly_profiles_{STATE}", summary
-    )
+    profiles = config.ROOT / "data" / "processed" / f"hourly_profiles_{STATE}"
+    modeled = hourly.state_annual_means(profiles, summary)
     # The sales to customers are net of the generation of the panels already installed.
     net = {**modeled, "electricity": modeled["electricity"] + modeled["electricity_pv"]}
     eia = validation.measured_level_factors(
         measured, net, config.MEASURED_YEAR_HOUSEHOLDS
     )
-    logging.info("measured %s; modeled %s; factors %s", measured, modeled, eia)
+    monthly = validation.read_eia_monthly_residential(
+        directory, config.STATE, config.MEASURED_YEAR
+    )
+    state = hourly.state_hourly_means(profiles, summary)
+    gas = [c for c in state.columns if c.startswith("natural_gas_")]
+    heat = [c for c in gas if "_heating" in c]
+    months = state.index.month
+    households = float(config.MEASURED_YEAR_HOUSEHOLDS)
+    by_month = lambda cols: (  # noqa: E731
+        state[cols].sum(axis=1).groupby(months).sum().to_numpy() * households
+    )
+    base = validation.base_load_heating_factor(
+        monthly["natural_gas_kwh"].to_numpy(),
+        by_month(heat),
+        by_month([c for c in gas if c not in heat]),
+    )
+    logging.info("measured %s; modeled %s; factors %s %s", measured, modeled, eia, base)
+    recs = (
+        float(row.loc["heating_kwh", "mean"] / row.loc["heating_kwh", "resstock"]),
+        float(row.loc["cooling_kwh", "mean"] / row.loc["cooling_kwh", "resstock"]),
+    )
+    pd.DataFrame(
+        [
+            {"reference": "resstock", "heating": 1.0, "cooling": 1.0},
+            {
+                "reference": "base_load_implied",
+                "heating": base["heating_factor"],
+                "cooling": 1.0,
+            },
+            {"reference": "recs_implied", "heating": recs[0], "cooling": recs[1]},
+            {
+                "reference": "rejected_eia_implied",
+                "heating": eia["heating"],
+                "cooling": eia["cooling"],
+            },
+        ]
+    ).assign(
+        other_gas_uses_factor=[1.0, base["other_uses_factor"], np.nan, np.nan],
+        out_of_sample_error=[np.nan, base["out_of_sample_error"], np.nan, np.nan],
+    ).to_csv(
+        config.ROOT / "data" / "results" / "tables" / f"level_factors_{STATE}.csv",
+        index=False,
+    )
     return {
         "resstock": (1.0, 1.0),
-        "recs_implied": (
-            float(row.loc["heating_kwh", "mean"] / row.loc["heating_kwh", "resstock"]),
-            float(row.loc["cooling_kwh", "mean"] / row.loc["cooling_kwh", "resstock"]),
-        ),
-        "eia_implied": (eia["heating"], eia["cooling"]),
+        "base_load_implied": (base["heating_factor"], 1.0),
+        "recs_implied": recs,
     }
 
 
@@ -145,6 +189,63 @@ def _scale_table(
     return pd.DataFrame(rows)
 
 
+def _write_levels(rule, draws, factors, main_puma, results) -> None:
+    """Scale the simulations to each level reference and write the summaries."""
+    for name, (heating_factor, cooling_factor) in factors.items():
+        scaled = uncertainty.apply_level_factors(draws, heating_factor, cooling_factor)
+        summary = uncertainty.summarize_draws(scaled, QUANTITIES)
+        summary.to_csv(
+            results / f"tract_energy_uncertainty_{rule}_{name}_{STATE}.csv",
+            index=False,
+        )
+        for quantity in ("heating_kbtu", "cooling_kbtu"):
+            stability = uncertainty.rank_stability(scaled, quantity)
+            stability.to_csv(
+                results / f"rank_stability_{quantity}_{rule}_{name}_{STATE}.csv",
+                index=False,
+            )
+        if rule == "linear" and name == "resstock":
+            for quantity in ("heating_kbtu", "cooling_kbtu"):
+                scale = _scale_table(scaled, main_puma, quantity)
+                scale.to_csv(
+                    results / f"uncertainty_by_scale_{quantity}_{STATE}.csv",
+                    index=False,
+                )
+                logging.info("by scale, %s:\n%s", quantity, scale.round(3))
+        all_tracts = summary[summary["group"] == "all"]
+        logging.info(
+            "%s / %s: median coefficient of variation heating %.1f %%, "
+            "cooling %.1f %%; quality of heating: %s",
+            rule,
+            name,
+            all_tracts["heating_kbtu_cv"].median(),
+            all_tracts["cooling_kbtu_cv"].median(),
+            all_tracts["heating_kbtu_quality"].value_counts().to_dict(),
+        )
+
+
+def _main_puma() -> pd.Series:
+    """PUMA that holds the largest share of each tract."""
+    share = pd.read_csv(
+        config.INTERIM / f"tract_puma_share_{STATE}.csv", dtype={"GEOID": str}
+    )
+    return share.loc[share.groupby("GEOID")["share"].idxmax()].set_index("GEOID")[
+        "resstock_puma"
+    ]
+
+
+def levels_only() -> None:
+    """Apply the level references again to the simulations already saved."""
+    results = config.ROOT / "data" / "results" / "tables"
+    factors = _level_factors()
+    logging.info("level factors: %s", factors)
+    for rule in ("linear", "cap"):
+        draws = pd.read_parquet(
+            config.INTERIM / f"tract_energy_draws_{rule}_{STATE}.parquet"
+        )
+        _write_levels(rule, draws, factors, _main_puma(), results)
+
+
 def run() -> None:
     """Simulate, save the simulations and the summaries."""
     interim = config.INTERIM
@@ -192,10 +293,7 @@ def run() -> None:
         {"use": list(transfer_tau), "tau": list(transfer_tau.values())}
     ).to_csv(results / f"transfer_tau_{STATE}.csv", index=False)
     logging.info("transfer error deviation: %s", transfer_tau)
-    share = pd.read_csv(interim / f"tract_puma_share_{STATE}.csv", dtype={"GEOID": str})
-    main_puma = share.loc[share.groupby("GEOID")["share"].idxmax()].set_index("GEOID")[
-        "resstock_puma"
-    ]
+    main_puma = _main_puma()
     factors = _level_factors()
     logging.info("level factors: %s", factors)
 
@@ -219,41 +317,14 @@ def run() -> None:
         draws.to_parquet(
             interim / f"tract_energy_draws_{rule}_{STATE}.parquet", index=False
         )
-        for name, (heating_factor, cooling_factor) in factors.items():
-            scaled = uncertainty.apply_level_factors(
-                draws, heating_factor, cooling_factor
-            )
-            summary = uncertainty.summarize_draws(scaled, QUANTITIES)
-            summary.to_csv(
-                results / f"tract_energy_uncertainty_{rule}_{name}_{STATE}.csv",
-                index=False,
-            )
-            for quantity in ("heating_kbtu", "cooling_kbtu"):
-                stability = uncertainty.rank_stability(scaled, quantity)
-                stability.to_csv(
-                    results / f"rank_stability_{quantity}_{rule}_{name}_{STATE}.csv",
-                    index=False,
-                )
-            if rule == "linear" and name == "resstock":
-                for quantity in ("heating_kbtu", "cooling_kbtu"):
-                    scale = _scale_table(scaled, main_puma, quantity)
-                    scale.to_csv(
-                        results / f"uncertainty_by_scale_{quantity}_{STATE}.csv",
-                        index=False,
-                    )
-                    logging.info("by scale, %s:\n%s", quantity, scale.round(3))
-            all_tracts = summary[summary["group"] == "all"]
-            logging.info(
-                "%s / %s: median coefficient of variation heating %.1f %%, "
-                "cooling %.1f %%; quality of heating: %s",
-                rule,
-                name,
-                all_tracts["heating_kbtu_cv"].median(),
-                all_tracts["cooling_kbtu_cv"].median(),
-                all_tracts["heating_kbtu_quality"].value_counts().to_dict(),
-            )
+        _write_levels(rule, draws, factors, main_puma, results)
 
 
 if __name__ == "__main__":
+    import sys
+
     logging.basicConfig(level=logging.INFO)
-    run()
+    if "--levels-only" in sys.argv:
+        levels_only()
+    else:
+        run()

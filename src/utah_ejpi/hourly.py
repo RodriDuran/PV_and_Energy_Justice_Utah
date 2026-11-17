@@ -85,10 +85,13 @@ __all__ = [
     "fit_temperature_response",
     "fuel_use_profiles",
     "hourly_components",
+    "monthly_sums",
     "read_dwelling_hourly",
     "reshape_load",
     "read_profiles",
     "state_annual_means",
+    "state_hourly_means",
+    "state_monthly_means",
     "read_tract_profile",
     "short_name",
     "temperature_response_shape",
@@ -1009,6 +1012,127 @@ def state_annual_means(
             totals[name] += float(n) * float(sums[[c for c in kwh if test(c)]].sum())
     n_total = float(tract_dwellings.sum())
     return {name: value / n_total for name, value in totals.items()}
+
+
+def monthly_sums(profile: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    """Add up the hours of each calendar month of a profile.
+
+    Parameters
+    ----------
+    profile : pandas.DataFrame
+        A profile with a ``timestamp`` column in local standard time (see
+        :func:`read_tract_profile`), one row per hour of one year.
+    columns : sequence of str
+        Columns to add up.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Twelve rows indexed by month (1 to 12) with the sum of each column.
+
+    Examples
+    --------
+    >>> hours = pd.date_range("2018-01-01", periods=8760, freq="h")
+    >>> frame = pd.DataFrame({"timestamp": hours, "x": 1.0})
+    >>> monthly_sums(frame, ["x"]).loc[[1, 2], "x"].tolist()
+    [744.0, 672.0]
+    """
+    month = pd.DatetimeIndex(profile["timestamp"]).month
+    sums = profile[list(columns)].groupby(month).sum()
+    sums.index.name = "month"
+    return sums
+
+
+def state_monthly_means(
+    profile_dir: str | os.PathLike, tract_dwellings: pd.Series
+) -> pd.DataFrame:
+    """Mean monthly energy per dwelling of all the tracts, by fuel and use.
+
+    Like :func:`state_annual_means` but by calendar month: the hours of each month
+    of every tract are added up and the tracts are averaged weighted by their
+    dwellings. It is the modeled consumption that is compared with the monthly
+    totals of the state sold by the utilities.
+
+    Parameters
+    ----------
+    profile_dir : path-like
+        Folder written by :func:`build_tract_profiles`.
+    tract_dwellings : pandas.Series
+        Occupied dwellings of every tract, indexed by ``GEOID``; the tracts are the
+        ones averaged.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Twelve rows indexed by month; kWh per dwelling and month of the same groups
+        as :func:`state_annual_means`, with its column names.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a tract has no profile.
+
+    Examples
+    --------
+    >>> state_monthly_means(profile_dir, tract_dwellings)  # doctest: +SKIP
+    """
+    totals = pd.DataFrame(
+        0.0, index=pd.RangeIndex(1, 13, name="month"), columns=list(_MEAN_GROUPS)
+    )
+    for geoid, n in tract_dwellings.items():
+        profile = read_tract_profile(profile_dir, geoid)
+        kwh = [c for c in profile.columns if c.endswith("_kwh")]
+        monthly = monthly_sums(profile, kwh)
+        for name, test in _MEAN_GROUPS.items():
+            members = [c for c in kwh if test(c)]
+            totals[name] += float(n) * monthly[members].sum(axis=1)
+    return totals / float(tract_dwellings.sum())
+
+
+def state_hourly_means(
+    profile_dir: str | os.PathLike, tract_dwellings: pd.Series
+) -> pd.DataFrame:
+    """Mean hourly energy per dwelling of all the tracts, column by column.
+
+    Like :func:`state_annual_means` but keeps the 8,760 hours and every energy
+    column in kWh of the profiles (fuel and use), so the state series can be grouped
+    by use, by month or shifted in time.
+
+    Parameters
+    ----------
+    profile_dir : path-like
+        Folder written by :func:`build_tract_profiles`.
+    tract_dwellings : pandas.Series
+        Occupied dwellings of every tract, indexed by ``GEOID``; the tracts are the
+        ones averaged.
+
+    Returns
+    -------
+    pandas.DataFrame
+        8,760 rows indexed by the hour (local standard time), one column per
+        profile column that ends in ``_kwh``, in kWh per dwelling and hour.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a tract has no profile.
+
+    Examples
+    --------
+    >>> state_hourly_means(profile_dir, tract_dwellings)  # doctest: +SKIP
+    """
+    total, hours, names = None, None, None
+    for geoid, n in tract_dwellings.items():
+        profile = read_tract_profile(profile_dir, geoid)
+        names = [c for c in profile.columns if c.endswith("_kwh")]
+        values = profile[names].to_numpy(dtype="float64") * float(n)
+        total = values if total is None else total + values
+        hours = profile["timestamp"]
+    if total is None:
+        raise ValueError("tract_dwellings is empty.")
+    out = pd.DataFrame(total / float(tract_dwellings.sum()), columns=names)
+    out.index = pd.DatetimeIndex(hours, name="hour")
+    return out
 
 
 def read_profiles(

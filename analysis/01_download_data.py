@@ -36,6 +36,14 @@ def main() -> None:
                 weather=own,
                 timeseries_buildings=config.RESSTOCK_TIMESERIES if own else (),
             )
+    if config.DOWNLOAD_COMPARISON_STATES:
+        for state in config.COMPARISON_STATES:
+            dl.download_resstock(
+                raw / "resstock" / "2025_amy2018_release_1", state, (0,), weather=False
+            )
+            dl.download_eia_state_totals(
+                raw / f"eia_state_totals_{state.lower()}", state
+            )
     if config.DOWNLOAD_RECS:
         dl.download_recs(raw / "recs_2020")
     if config.DOWNLOAD_PRISM:
@@ -47,6 +55,10 @@ def main() -> None:
         dl.download_eia930(raw / "eia930_2018", 2018)
     if config.DOWNLOAD_EIA_STATE_TOTALS:
         dl.download_eia_state_totals(
+            raw / f"eia_state_totals_{config.STATE.lower()}", config.STATE
+        )
+    if config.DOWNLOAD_EIA_MONTHLY:
+        dl.download_eia_monthly(
             raw / f"eia_state_totals_{config.STATE.lower()}", config.STATE
         )
     if config.DOWNLOAD_LEAD:

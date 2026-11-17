@@ -33,6 +33,8 @@ STATES = [STATE]
 # or year, look up both. The sales workbook of the Energy Information Administration
 # must include the year.
 MEASURED_YEAR = 2018
+# Year of the household survey (RECS) used for the comparison of end uses.
+RECS_YEAR = 2020
 MEASURED_YEAR_HOUSEHOLDS = 998891
 
 CLIMATE_FIT_STATES = {
@@ -155,6 +157,27 @@ DOWNLOAD_BLOCKS = False
 # ResStock 2025 release 1 (actual 2018 weather): documentation, tract lookup,
 # annual results of the listed upgrades and county weather. About 500 MB.
 DOWNLOAD_RESSTOCK = False
+
+# States used to check whether the differences found in the state of the study repeat
+# elsewhere (section I of 13_validation.py): the annual results of ResStock (about
+# 5-30 MB each) and the residential totals of the Energy Information Administration of
+# each one. The neighbors of Utah plus states of a very different climate. A few
+# minutes.
+COMPARISON_STATES = [
+    "CO",
+    "ID",
+    "WY",
+    "NV",
+    "AZ",
+    "NM",
+    "MT",
+    "MN",
+    "TX",
+    "WA",
+    "OH",
+    "NY",
+]
+DOWNLOAD_COMPARISON_STATES = False
 RESSTOCK_UPGRADES = [0, 1, 4, 11, 12, 13, 14, 15, 16, 17]
 # Hourly (15-minute) series per dwelling, 6-7 MB each. Empty by default.
 RESSTOCK_TIMESERIES = []
@@ -192,6 +215,11 @@ DOWNLOAD_EIA930 = False
 # Administration): natural gas and electricity totals, used to check the level of
 # the modeled energy. Three small files, a few seconds.
 DOWNLOAD_EIA_STATE_TOTALS = False
+
+# Measured residential consumption of the state by month (U.S. Energy Information
+# Administration): natural gas and electricity, used to check the seasonal pattern
+# of the modeled energy. Two small files (about 2.3 MB), a few seconds.
+DOWNLOAD_EIA_MONTHLY = False
 
 # Low-Income Energy Affordability Data 2022 (U.S. Department of Energy). About
 # 60 MB for Utah.
